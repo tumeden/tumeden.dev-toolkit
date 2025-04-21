@@ -19,22 +19,6 @@ An advanced automation script for ResBot units that handles:
 
 2. Launch BAR and enable the widget(s) in the Widget List (F11)
 
-## Usage
 
-Each script includes detailed documentation at the top of the file explaining:
-- Configuration options
-- Hotkeys and commands
-- Features and functionality
-
-## Contributing
-
-Feel free to:
-- Submit bug reports
-- Suggest improvements
-- Share your own scripts
-
-## License
-
-[MIT License](LICENSE)
 
 
