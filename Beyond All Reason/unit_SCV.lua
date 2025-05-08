@@ -2,7 +2,7 @@
 -- /////////////////////////////////////////// GetInfo Function
 function widget:GetInfo()
   return {
-    name      = "TESTING RezBots - AGENT",
+    name      = "RezBots - AGENT",
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
