@@ -1,4 +1,4 @@
--- // This is still work in progress.
+-- // Added Legion Support
 -- /////////////////////////////////////////// GetInfo Function
 function widget:GetInfo()
   return {
