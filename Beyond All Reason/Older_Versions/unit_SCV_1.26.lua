@@ -1,4 +1,4 @@
--- // This is still work in progress.
+-- // Added Legion Support
 -- /////////////////////////////////////////// GetInfo Function
 function widget:GetInfo()
   return {
@@ -6,14 +6,12 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.27",
+    version   = "v1.26",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
   }
 end
-
-local widgetVersion = widget:GetInfo().version
 
 
 
@@ -60,7 +58,6 @@ local spGetFeaturePosition = Spring.GetFeaturePosition
 local spGetGameFrame = Spring.GetGameFrame
 local spGetGroundHeight = Spring.GetGroundHeight
 local spGetUnitSeparation = Spring.GetUnitSeparation
-local GetUnitIsCloaked = Spring.GetUnitIsCloaked -- Added for cloaked check
 
 -- Command Definitions
 local CMD_MOVE = CMD.MOVE
@@ -116,27 +113,17 @@ end
 -- UI Variables and Constants
 local showUI = false
 local UI = {
-    width = 340,
-    height = 540,
+    width = 300,
+    height = 400,
     backgroundColor = {0.1, 0.1, 0.1, 0.9},
     textColor = {1, 1, 1, 1},
-    sectionHeaderColor = {0.8, 0.9, 1, 1},
-    sectionBgColor = {0.15, 0.15, 0.18, 0.7},
     checkboxColor = {0.3, 0.7, 0.3, 0.9},
     sliderColor = {0.3, 0.7, 0.3, 0.9},
     sliderKnobColor = {0.4, 0.8, 0.4, 1.0},
     sliderKnobSize = 12,
-    padding = 24,
-    spacing = 35,
-    sectionSpacing = 44,
-    sectionHeaderSize = 16
+    padding = 20,
+    spacing = 35
 }
-
--- Movable UI state
-local uiPosX = 0.5 -- normalized (0 = left, 1 = right)
-local uiPosY = 0.7 -- normalized (0 = bottom, 1 = top)
-local isDraggingUI = false
-local dragOffsetX, dragOffsetY = 0, 0
 
 -- Track which slider is being dragged
 local activeDragSlider = nil
@@ -146,8 +133,7 @@ local checkboxes = {
     excludeBuildings = { state = false, label = "Exclude buildings from Resurrection" },
     healing = { state = false, label = "Healing" },
     collecting = { state = false, label = "Resource Collection" },
-    resurrecting = { state = false, label = "Resurrect" },
-    healCloaked = { state = false, label = "Heal Cloaked Units" } -- New toggle, now defaults to false
+    resurrecting = { state = false, label = "Resurrect" }  -- Changed from resurrect to resurrecting to match usage
 }
 
 local sliders = {
@@ -181,9 +167,276 @@ function widget:Initialize()
     reclaimRadius = Spring.GetConfigInt("scv_reclaimRadius", reclaimRadius)
     enemyAvoidanceRadius = Spring.GetConfigInt("scv_enemyAvoidanceRadius", enemyAvoidanceRadius)
     
-    -- Load UI position (normalized)
-    uiPosX = Spring.GetConfigFloat("scv_uiPosX", uiPosX)
-    uiPosY = Spring.GetConfigFloat("scv_uiPosY", uiPosY)
+    -- Update slider values
+    sliders.healResurrectRadius.value = healResurrectRadius
+    sliders.reclaimRadius.value = reclaimRadius
+    sliders.enemyAvoidanceRadius.value = enemyAvoidanceRadius
+    
+    -- Load checkbox states
+    for k, v in pairs(checkboxes) do
+        v.state = Spring.GetConfigInt("scv_checkbox_"..k, v.state and 1 or 0) == 1
+    end
+
+    if UnitDefNames then
+        if UnitDefNames.armrectr then armRectrDefID = UnitDefNames.armrectr.id end
+        if UnitDefNames.cornecro then corNecroDefID = UnitDefNames.cornecro.id end
+        if UnitDefNames.legrezbot then legRezbotDefID = UnitDefNames.legrezbot.id end
+
+        if not (armRectrDefID or corNecroDefID or legRezbotDefID) then
+            Spring.Echo("No supported RezBot UnitDefIDs could be determined")
+            widgetHandler:RemoveWidget()
+            return
+        end
+    else
+        Spring.Echo("UnitDefNames table not found")
+        widgetHandler:RemoveWidget()
+        return
+    end
+end
+
+function widget:DrawScreen()
+    if not showUI then return end
+    
+    local vsx, vsy = Spring.GetViewGeometry()
+    local x = (vsx - UI.width) / 2
+    local y = (vsy + UI.height) / 2
+    
+    -- Draw background (single, clean background)
+    gl.Color(0.1, 0.1, 0.1, 0.9)
+    gl.Rect(x, y - UI.height, x + UI.width, y)
+    
+    -- Draw title
+    gl.Color(1, 1, 1, 1)
+    gl.Text("RezBot Settings", x + UI.padding, y - 30, 14)
+    
+    -- Draw checkboxes
+    local cy = y - 60
+    for _, box in pairs(checkboxes) do
+        -- Draw checkbox background
+        gl.Color(0.2, 0.2, 0.2, 0.8)
+        gl.Rect(x + UI.padding, cy, x + UI.padding + 16, cy + 16)
+        
+        -- Draw check if selected
+        if box.state then
+            gl.Color(0.3, 0.7, 0.3, 0.9)
+            gl.Rect(x + UI.padding + 2, cy + 2, x + UI.padding + 14, cy + 14)
+        end
+        
+        -- Draw label
+        gl.Color(1, 1, 1, 1)
+        gl.Text(box.label, x + UI.padding + 24, cy + 2, 12)
+        
+        cy = cy - UI.spacing
+    end
+    
+    -- Draw sliders
+    local sy = cy - UI.spacing
+    for _, slider in pairs(sliders) do
+        -- Draw label
+        gl.Color(1, 1, 1, 1)
+        gl.Text(slider.label, x + UI.padding, sy + 20, 12)
+        
+        -- Draw slider background
+        gl.Color(0.2, 0.2, 0.2, 0.8)
+        gl.Rect(x + UI.padding, sy, x + UI.padding + 200, sy + 6)
+        
+        -- Draw filled portion
+        local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+        gl.Color(0.3, 0.7, 0.3, 0.9)
+        gl.Rect(x + UI.padding, sy, x + UI.padding + fillWidth, sy + 6)
+        
+        -- Draw knob
+        local knobX = x + UI.padding + fillWidth
+        local knobY = sy + 3
+        
+        -- Draw knob shadow
+        drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
+        -- Draw main knob
+        drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
+        -- Draw highlight
+        drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
+        
+        -- Draw value
+        gl.Color(1, 1, 1, 1)
+        gl.Text(string.format("%.0f", slider.value), x + UI.padding + 210, sy - 2, 12)
+        
+        sy = sy - UI.spacing
+    end
+end
+
+function widget:MousePress(mx, my, button)
+    if not showUI then return false end
+    
+    local vsx, vsy = Spring.GetViewGeometry()
+    local x = (vsx - UI.width) / 2
+    local y = (vsy + UI.height) / 2
+    
+    -- Check for checkbox clicks
+    local cy = y - 60
+    for name, box in pairs(checkboxes) do
+        if mx >= x + UI.padding and mx <= x + UI.padding + 16 and
+           my >= cy and my <= cy + 16 then
+            box.state = not box.state
+            Spring.SetConfigInt("scv_checkbox_"..name, box.state and 1 or 0)
+            return true
+        end
+        cy = cy - UI.spacing
+    end
+    
+    -- Check for slider interactions with expanded hit area for knob
+    local sy = cy - UI.spacing
+    for name, slider in pairs(sliders) do
+        local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+        local knobX = x + UI.padding + fillWidth
+        local knobY = sy + 3
+        
+        -- Check if click is within knob area (slightly larger than visual size)
+        local knobHitSize = UI.sliderKnobSize + 4
+        if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
+           (mx >= x + UI.padding and mx <= x + UI.padding + 200 and
+            my >= sy - 4 and my <= sy + 10) then
+            
+            -- Start dragging this slider
+            activeDragSlider = slider
+            activeDragName = name
+            
+            -- Update the slider value
+            local ratio = (mx - (x + UI.padding)) / 200
+            ratio = math.max(0, math.min(1, ratio))
+            slider.value = mathFloor(slider.min + (slider.max - slider.min) * ratio)
+            
+            -- Update the corresponding variable
+            if name == "healResurrectRadius" then 
+                healResurrectRadius = slider.value
+                Spring.SetConfigInt("scv_healResurrectRadius", slider.value)
+            elseif name == "reclaimRadius" then 
+                reclaimRadius = slider.value
+                Spring.SetConfigInt("scv_reclaimRadius", slider.value)
+            elseif name == "enemyAvoidanceRadius" then 
+                enemyAvoidanceRadius = slider.value
+                Spring.SetConfigInt("scv_enemyAvoidanceRadius", slider.value)
+            end
+            return true
+        end
+        sy = sy - UI.spacing
+    end
+    
+    return false
+end
+
+function widget:MouseRelease(mx, my, button)
+    if activeDragSlider then
+        activeDragSlider = nil
+        activeDragName = nil
+        return true
+    end
+    return false
+end
+
+function widget:MouseMove(mx, my, dx, dy, button)
+    if not showUI then return end
+    
+    -- Only process if we're dragging a slider
+    if activeDragSlider then
+        local vsx, vsy = Spring.GetViewGeometry()
+        local x = (vsx - UI.width) / 2
+        
+        -- Calculate new slider value
+        local ratio = (mx - (x + UI.padding)) / 200
+        ratio = math.max(0, math.min(1, ratio))
+        activeDragSlider.value = mathFloor(activeDragSlider.min + (activeDragSlider.max - activeDragSlider.min) * ratio)
+        
+        -- Update the corresponding variable
+        if activeDragName == "healResurrectRadius" then 
+            healResurrectRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_healResurrectRadius", activeDragSlider.value)
+        elseif activeDragName == "reclaimRadius" then 
+            reclaimRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_reclaimRadius", activeDragSlider.value)
+        elseif activeDragName == "enemyAvoidanceRadius" then 
+            enemyAvoidanceRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_enemyAvoidanceRadius", activeDragSlider.value)
+        end
+    end
+end
+
+function widget:KeyPress(key, mods, isRepeat)
+    if key == 0x0076 and mods.alt then  -- Alt+V to toggle UI
+        showUI = not showUI
+        return true
+    elseif key == 27 then  -- Escape to close UI
+        showUI = false
+        return true
+    end
+    return false
+end
+
+
+
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- ////////////////////////////////////////- UI CODE -////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+
+
+
+-- UI Variables and Constants
+local showUI = false
+local UI = {
+    width = 300,
+    height = 400,
+    backgroundColor = {0.1, 0.1, 0.1, 0.9},
+    textColor = {1, 1, 1, 1},
+    checkboxColor = {0.3, 0.7, 0.3, 0.9},
+    sliderColor = {0.3, 0.7, 0.3, 0.9},
+    sliderKnobColor = {0.4, 0.8, 0.4, 1.0},
+    sliderKnobSize = 12,
+    padding = 20,
+    spacing = 35
+}
+
+-- Track which slider is being dragged
+local activeDragSlider = nil
+local activeDragName = nil
+
+local checkboxes = {
+    excludeBuildings = { state = false, label = "Exclude buildings from Resurrection" },
+    healing = { state = false, label = "Healing" },
+    collecting = { state = false, label = "Resource Collection" },
+    resurrecting = { state = false, label = "Resurrect" }  -- Changed from resurrect to resurrecting to match usage
+}
+
+local sliders = {
+    healResurrectRadius = { value = healResurrectRadius, min = 0, max = 2000, label = "Heal/Resurrect Radius" },
+    reclaimRadius = { value = reclaimRadius, min = 0, max = 5000, label = "Resource Collection Radius" },
+    enemyAvoidanceRadius = { value = enemyAvoidanceRadius, min = 0, max = 2000, label = "Maintain Safe Distance" }
+}
+
+-- Helper function to draw circular knob
+local function drawCircle(x, y, radius, color)
+    gl.Color(unpack(color))
+    gl.BeginEnd(GL.TRIANGLE_FAN, function()
+        gl.Vertex(x, y)
+        for i = 0, 30 do
+            local angle = (i / 30) * 2 * math.pi
+            gl.Vertex(x + math.cos(angle) * radius, 
+                     y + math.sin(angle) * radius)
+        end
+    end)
+end
+
+function widget:Initialize()
+    if Spring.GetSpectatingState() then
+        Spring.Echo("You are a spectator. Widget is disabled.")
+        widgetHandler:RemoveWidget(self)
+        return
+    end
+
+    -- Load persistent UI state
+    healResurrectRadius = Spring.GetConfigInt("scv_healResurrectRadius", healResurrectRadius)
+    reclaimRadius = Spring.GetConfigInt("scv_reclaimRadius", reclaimRadius)
+    enemyAvoidanceRadius = Spring.GetConfigInt("scv_enemyAvoidanceRadius", enemyAvoidanceRadius)
     
     -- Update slider values
     sliders.healResurrectRadius.value = healResurrectRadius
@@ -216,301 +469,133 @@ function widget:DrawScreen()
     if not showUI then return end
     
     local vsx, vsy = Spring.GetViewGeometry()
-    local x = math.floor(uiPosX * vsx - UI.width / 2)
-    local y = math.floor(uiPosY * vsy + UI.height / 2)
+    local x = (vsx - UI.width) / 2
+    local y = (vsy + UI.height) / 2
     
-    -- Draw background
-    gl.Color(UI.backgroundColor[1], UI.backgroundColor[2], UI.backgroundColor[3], UI.backgroundColor[4])
+    -- Draw background (single, clean background)
+    gl.Color(0.1, 0.1, 0.1, 0.9)
     gl.Rect(x, y - UI.height, x + UI.width, y)
     
-    -- Draw title bar
-    gl.Color(0.18, 0.18, 0.18, 1)
-    gl.Rect(x, y - 30, x + UI.width, y)
+    -- Draw title
     gl.Color(1, 1, 1, 1)
-    gl.Text("RezBot Settings (" .. widgetVersion .. ")", x + UI.width/2 - 90, y - 30 + 8, 14, "o")
+    gl.Text("RezBot Settings", x + UI.padding, y - 30, 14)
     
+    -- Draw checkboxes
     local cy = y - 60
-    local sectionPad = 16
-    local sectionGap = 16
-    local headerH = UI.sectionHeaderSize + 8
-    local boxH = 16
-    local sliderH = 26
-    local spacing = UI.spacing
-    local sectionW = UI.width - 32
-    local sectionX = x + (UI.width - sectionW) / 2
-    -- Section: Healing
-    local healingControls = {"healing", "healCloaked"}
-    local healingSlider = true
-    local healingSectionHeight = headerH + #healingControls * spacing + (healingSlider and sliderH or 0) + sectionPad * 2
-    local healingTop = cy + sectionPad
-    local healingBot = cy - healingSectionHeight + sectionPad
-    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
-    gl.Rect(sectionX, healingBot, sectionX + sectionW, healingTop)
-    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
-    gl.Text("Healing", x + UI.width/2 - 40, cy - 2, UI.sectionHeaderSize, "o")
-    cy = cy - headerH
-    for _, name in ipairs(healingControls) do
-        local box = checkboxes[name]
-        local cx = x + UI.padding
+    for _, box in pairs(checkboxes) do
+        -- Draw checkbox background
         gl.Color(0.2, 0.2, 0.2, 0.8)
-        gl.Rect(cx, cy, cx + boxH, cy + boxH)
+        gl.Rect(x + UI.padding, cy, x + UI.padding + 16, cy + 16)
+        
+        -- Draw check if selected
         if box.state then
             gl.Color(0.3, 0.7, 0.3, 0.9)
-            gl.Rect(cx + 2, cy + 2, cx + boxH - 2, cy + boxH - 2)
+            gl.Rect(x + UI.padding + 2, cy + 2, x + UI.padding + 14, cy + 14)
         end
+        
+        -- Draw label
         gl.Color(1, 1, 1, 1)
-        gl.Text(box.label, cx + 24, cy + 2, 12)
-        cy = cy - spacing
+        gl.Text(box.label, x + UI.padding + 24, cy + 2, 12)
+        
+        cy = cy - UI.spacing
     end
-    -- Healing slider
-    local slider = sliders.healResurrectRadius
-    local sliderX = x + UI.padding
-    gl.Color(1, 1, 1, 1)
-    gl.Text(slider.label, sliderX, cy + 20, 12)
-    gl.Color(0.2, 0.2, 0.2, 0.8)
-    gl.Rect(sliderX, cy, sliderX + 200, cy + 6)
-    local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
-    gl.Color(0.3, 0.7, 0.3, 0.9)
-    gl.Rect(sliderX, cy, sliderX + fillWidth, cy + 6)
-    local knobX = sliderX + fillWidth
-    local knobY = cy + 3
-    drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
-    drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
-    drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
-    gl.Color(1, 1, 1, 1)
-    gl.Text(string.format("%.0f", slider.value), sliderX + 210, cy - 2, 12)
-    cy = cy - sliderH
-    cy = cy - sectionPad
-    cy = cy - sectionGap
-    -- Section: Resurrection
-    local resurrectionControls = {"resurrecting", "excludeBuildings"}
-    local resurrectionSlider = false
-    local resurrectionSectionHeight = headerH + #resurrectionControls * spacing + (resurrectionSlider and sliderH or 0) + sectionPad * 2
-    local resurrectionTop = cy + sectionPad
-    local resurrectionBot = cy - resurrectionSectionHeight + sectionPad
-    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
-    gl.Rect(sectionX, resurrectionBot, sectionX + sectionW, resurrectionTop)
-    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
-    gl.Text("Resurrection", x + UI.width/2 - 60, cy - 2, UI.sectionHeaderSize, "o")
-    cy = cy - headerH
-    for _, name in ipairs(resurrectionControls) do
-        local box = checkboxes[name]
-        local cx = x + UI.padding
+    
+    -- Draw sliders
+    local sy = cy - UI.spacing
+    for _, slider in pairs(sliders) do
+        -- Draw label
+        gl.Color(1, 1, 1, 1)
+        gl.Text(slider.label, x + UI.padding, sy + 20, 12)
+        
+        -- Draw slider background
         gl.Color(0.2, 0.2, 0.2, 0.8)
-        gl.Rect(cx, cy, cx + boxH, cy + boxH)
-        if box.state then
-            gl.Color(0.3, 0.7, 0.3, 0.9)
-            gl.Rect(cx + 2, cy + 2, cx + boxH - 2, cy + boxH - 2)
-        end
+        gl.Rect(x + UI.padding, sy, x + UI.padding + 200, sy + 6)
+        
+        -- Draw filled portion
+        local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+        gl.Color(0.3, 0.7, 0.3, 0.9)
+        gl.Rect(x + UI.padding, sy, x + UI.padding + fillWidth, sy + 6)
+        
+        -- Draw knob
+        local knobX = x + UI.padding + fillWidth
+        local knobY = sy + 3
+        
+        -- Draw knob shadow
+        drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
+        -- Draw main knob
+        drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
+        -- Draw highlight
+        drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
+        
+        -- Draw value
         gl.Color(1, 1, 1, 1)
-        gl.Text(box.label, cx + 24, cy + 2, 12)
-        cy = cy - spacing
+        gl.Text(string.format("%.0f", slider.value), x + UI.padding + 210, sy - 2, 12)
+        
+        sy = sy - UI.spacing
     end
-    cy = cy - sectionPad
-    cy = cy - sectionGap
-    -- Section: Resource Collection
-    local resourceControls = {"collecting"}
-    local resourceSlider = true
-    local resourceSectionHeight = headerH + #resourceControls * spacing + (resourceSlider and sliderH or 0) + sectionPad * 2
-    local resourceTop = cy + sectionPad
-    local resourceBot = cy - resourceSectionHeight + sectionPad
-    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
-    gl.Rect(sectionX, resourceBot, sectionX + sectionW, resourceTop)
-    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
-    gl.Text("Resource Collection", x + UI.width/2 - 90, cy - 2, UI.sectionHeaderSize, "o")
-    cy = cy - headerH
-    for _, name in ipairs(resourceControls) do
-        local box = checkboxes[name]
-        local cx = x + UI.padding
-        gl.Color(0.2, 0.2, 0.2, 0.8)
-        gl.Rect(cx, cy, cx + boxH, cy + boxH)
-        if box.state then
-            gl.Color(0.3, 0.7, 0.3, 0.9)
-            gl.Rect(cx + 2, cy + 2, cx + boxH - 2, cy + boxH - 2)
-        end
-        gl.Color(1, 1, 1, 1)
-        gl.Text(box.label, cx + 24, cy + 2, 12)
-        cy = cy - spacing
-    end
-    -- Resource Collection slider
-    slider = sliders.reclaimRadius
-    sliderX = x + UI.padding
-    gl.Color(1, 1, 1, 1)
-    gl.Text(slider.label, sliderX, cy + 20, 12)
-    gl.Color(0.2, 0.2, 0.2, 0.8)
-    gl.Rect(sliderX, cy, sliderX + 200, cy + 6)
-    fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
-    gl.Color(0.3, 0.7, 0.3, 0.9)
-    gl.Rect(sliderX, cy, sliderX + fillWidth, cy + 6)
-    knobX = sliderX + fillWidth
-    knobY = cy + 3
-    drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
-    drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
-    drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
-    gl.Color(1, 1, 1, 1)
-    gl.Text(string.format("%.0f", slider.value), sliderX + 210, cy - 2, 12)
-    cy = cy - sliderH
-    cy = cy - sectionPad
-    cy = cy - sectionGap
-    -- Section: Safety
-    local safetyControls = {}
-    local safetySlider = true
-    local safetySectionHeight = headerH + #safetyControls * spacing + (safetySlider and sliderH or 0) + sectionPad * 2
-    local safetyTop = cy + sectionPad
-    local safetyBot = cy - safetySectionHeight + sectionPad
-    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
-    gl.Rect(sectionX, safetyBot, sectionX + sectionW, safetyTop)
-    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
-    gl.Text("Safety", x + UI.width/2 - 30, cy - 2, UI.sectionHeaderSize, "o")
-    cy = cy - headerH
-    cy = cy - sectionPad
-    -- Safety slider
-    slider = sliders.enemyAvoidanceRadius
-    sliderX = x + UI.padding
-    gl.Color(1, 1, 1, 1)
-    gl.Text(slider.label, sliderX, cy + 20, 12)
-    gl.Color(0.2, 0.2, 0.2, 0.8)
-    gl.Rect(sliderX, cy, sliderX + 200, cy + 6)
-    fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
-    gl.Color(0.3, 0.7, 0.3, 0.9)
-    gl.Rect(sliderX, cy, sliderX + fillWidth, cy + 6)
-    knobX = sliderX + fillWidth
-    knobY = cy + 3
-    drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
-    drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
-    drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
-    gl.Color(1, 1, 1, 1)
-    gl.Text(string.format("%.0f", slider.value), sliderX + 210, cy - 2, 12)
 end
 
 function widget:MousePress(mx, my, button)
     if not showUI then return false end
+    
     local vsx, vsy = Spring.GetViewGeometry()
-    local x = math.floor(uiPosX * vsx - UI.width / 2)
-    local y = math.floor(uiPosY * vsy + UI.height / 2)
-    -- Check for title bar drag
-    if mx >= x and mx <= x + UI.width and my >= y - 30 and my <= y then
-        isDraggingUI = true
-        dragOffsetX = mx - x
-        dragOffsetY = my - y
-        return true
-    end
+    local x = (vsx - UI.width) / 2
+    local y = (vsy + UI.height) / 2
+    
     -- Check for checkbox clicks
     local cy = y - 60
-    local sectionPad = 16
-    local sectionGap = 16
-    local headerH = UI.sectionHeaderSize + 8
-    local boxH = 16
-    local sliderH = 26
-    local spacing = UI.spacing
-    -- Healing section
-    cy = cy - headerH
-    for _, name in ipairs({"healing", "healCloaked"}) do
-        if mx >= x + UI.padding and mx <= x + UI.padding + boxH and
-           my >= cy and my <= cy + boxH then
-            checkboxes[name].state = not checkboxes[name].state
-            Spring.SetConfigInt("scv_checkbox_"..name, checkboxes[name].state and 1 or 0)
+    for name, box in pairs(checkboxes) do
+        if mx >= x + UI.padding and mx <= x + UI.padding + 16 and
+           my >= cy and my <= cy + 16 then
+            box.state = not box.state
+            Spring.SetConfigInt("scv_checkbox_"..name, box.state and 1 or 0)
             return true
         end
-        cy = cy - spacing
+        cy = cy - UI.spacing
     end
-    -- Healing slider
-    local healingSliderY = cy
-    local healingSliderX = x + UI.padding
-    local fillWidth = 200 * (sliders.healResurrectRadius.value - sliders.healResurrectRadius.min) / (sliders.healResurrectRadius.max - sliders.healResurrectRadius.min)
-    local knobX = healingSliderX + fillWidth
-    local knobY = healingSliderY + 3
-    local knobHitSize = UI.sliderKnobSize + 4
-    if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
-       (mx >= healingSliderX and mx <= healingSliderX + 200 and
-        my >= healingSliderY - 4 and my <= healingSliderY + 10) then
-        activeDragSlider = sliders.healResurrectRadius
-        activeDragName = "healResurrectRadius"
-        local ratio = (mx - healingSliderX) / 200
-        ratio = math.max(0, math.min(1, ratio))
-        sliders.healResurrectRadius.value = mathFloor(sliders.healResurrectRadius.min + (sliders.healResurrectRadius.max - sliders.healResurrectRadius.min) * ratio)
-        healResurrectRadius = sliders.healResurrectRadius.value
-        Spring.SetConfigInt("scv_healResurrectRadius", sliders.healResurrectRadius.value)
-        return true
-    end
-    cy = cy - sliderH
-    cy = cy - sectionPad
-    cy = cy - sectionGap
-    -- Resurrection section
-    cy = cy - headerH
-    for _, name in ipairs({"resurrecting", "excludeBuildings"}) do
-        if mx >= x + UI.padding and mx <= x + UI.padding + boxH and
-           my >= cy and my <= cy + boxH then
-            checkboxes[name].state = not checkboxes[name].state
-            Spring.SetConfigInt("scv_checkbox_"..name, checkboxes[name].state and 1 or 0)
+    
+    -- Check for slider interactions with expanded hit area for knob
+    local sy = cy - UI.spacing
+    for name, slider in pairs(sliders) do
+        local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+        local knobX = x + UI.padding + fillWidth
+        local knobY = sy + 3
+        
+        -- Check if click is within knob area (slightly larger than visual size)
+        local knobHitSize = UI.sliderKnobSize + 4
+        if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
+           (mx >= x + UI.padding and mx <= x + UI.padding + 200 and
+            my >= sy - 4 and my <= sy + 10) then
+            
+            -- Start dragging this slider
+            activeDragSlider = slider
+            activeDragName = name
+            
+            -- Update the slider value
+            local ratio = (mx - (x + UI.padding)) / 200
+            ratio = math.max(0, math.min(1, ratio))
+            slider.value = mathFloor(slider.min + (slider.max - slider.min) * ratio)
+            
+            -- Update the corresponding variable
+            if name == "healResurrectRadius" then 
+                healResurrectRadius = slider.value
+                Spring.SetConfigInt("scv_healResurrectRadius", slider.value)
+            elseif name == "reclaimRadius" then 
+                reclaimRadius = slider.value
+                Spring.SetConfigInt("scv_reclaimRadius", slider.value)
+            elseif name == "enemyAvoidanceRadius" then 
+                enemyAvoidanceRadius = slider.value
+                Spring.SetConfigInt("scv_enemyAvoidanceRadius", slider.value)
+            end
             return true
         end
-        cy = cy - spacing
+        sy = sy - UI.spacing
     end
-    cy = cy - sectionPad
-    cy = cy - sectionGap
-    -- Resource Collection section
-    cy = cy - headerH
-    if mx >= x + UI.padding and mx <= x + UI.padding + boxH and
-       my >= cy and my <= cy + boxH then
-        checkboxes.collecting.state = not checkboxes.collecting.state
-        Spring.SetConfigInt("scv_checkbox_collecting", checkboxes.collecting.state and 1 or 0)
-        return true
-    end
-    cy = cy - spacing
-    -- Resource Collection slider
-    local resourceSliderY = cy
-    local resourceSliderX = x + UI.padding
-    fillWidth = 200 * (sliders.reclaimRadius.value - sliders.reclaimRadius.min) / (sliders.reclaimRadius.max - sliders.reclaimRadius.min)
-    knobX = resourceSliderX + fillWidth
-    knobY = resourceSliderY + 3
-    if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
-       (mx >= resourceSliderX and mx <= resourceSliderX + 200 and
-        my >= resourceSliderY - 4 and my <= resourceSliderY + 10) then
-        activeDragSlider = sliders.reclaimRadius
-        activeDragName = "reclaimRadius"
-        local ratio = (mx - resourceSliderX) / 200
-        ratio = math.max(0, math.min(1, ratio))
-        sliders.reclaimRadius.value = mathFloor(sliders.reclaimRadius.min + (sliders.reclaimRadius.max - sliders.reclaimRadius.min) * ratio)
-        reclaimRadius = sliders.reclaimRadius.value
-        Spring.SetConfigInt("scv_reclaimRadius", sliders.reclaimRadius.value)
-        return true
-    end
-    cy = cy - sliderH
-    cy = cy - sectionPad
-    cy = cy - sectionGap
-    -- Safety section
-    cy = cy - headerH
-    cy = cy - sectionPad
-    -- Safety slider
-    local safetySliderY = cy
-    local safetySliderX = x + UI.padding
-    fillWidth = 200 * (sliders.enemyAvoidanceRadius.value - sliders.enemyAvoidanceRadius.min) / (sliders.enemyAvoidanceRadius.max - sliders.enemyAvoidanceRadius.min)
-    knobX = safetySliderX + fillWidth
-    knobY = safetySliderY + 3
-    if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
-       (mx >= safetySliderX and mx <= safetySliderX + 200 and
-        my >= safetySliderY - 4 and my <= safetySliderY + 10) then
-        activeDragSlider = sliders.enemyAvoidanceRadius
-        activeDragName = "enemyAvoidanceRadius"
-        local ratio = (mx - safetySliderX) / 200
-        ratio = math.max(0, math.min(1, ratio))
-        sliders.enemyAvoidanceRadius.value = mathFloor(sliders.enemyAvoidanceRadius.min + (sliders.enemyAvoidanceRadius.max - sliders.enemyAvoidanceRadius.min) * ratio)
-        enemyAvoidanceRadius = sliders.enemyAvoidanceRadius.value
-        Spring.SetConfigInt("scv_enemyAvoidanceRadius", sliders.enemyAvoidanceRadius.value)
-        return true
-    end
+    
     return false
 end
 
 function widget:MouseRelease(mx, my, button)
-    if isDraggingUI then
-        isDraggingUI = false
-        -- Save position
-        Spring.SetConfigFloat("scv_uiPosX", uiPosX)
-        Spring.SetConfigFloat("scv_uiPosY", uiPosY)
-        return true
-    end
     if activeDragSlider then
         activeDragSlider = nil
         activeDragName = nil
@@ -521,17 +606,289 @@ end
 
 function widget:MouseMove(mx, my, dx, dy, button)
     if not showUI then return end
-    local vsx, vsy = Spring.GetViewGeometry()
-    if isDraggingUI then
-        uiPosX = math.max(0, math.min(1, (mx - dragOffsetX + UI.width / 2) / vsx))
-        uiPosY = math.max(0, math.min(1, (my - dragOffsetY - UI.height / 2) / vsy))
-    end
+    
     -- Only process if we're dragging a slider
     if activeDragSlider then
-        local x = math.floor(uiPosX * vsx - UI.width / 2)
+        local vsx, vsy = Spring.GetViewGeometry()
+        local x = (vsx - UI.width) / 2
+        
+        -- Calculate new slider value
         local ratio = (mx - (x + UI.padding)) / 200
         ratio = math.max(0, math.min(1, ratio))
         activeDragSlider.value = mathFloor(activeDragSlider.min + (activeDragSlider.max - activeDragSlider.min) * ratio)
+        
+        -- Update the corresponding variable
+        if activeDragName == "healResurrectRadius" then 
+            healResurrectRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_healResurrectRadius", activeDragSlider.value)
+        elseif activeDragName == "reclaimRadius" then 
+            reclaimRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_reclaimRadius", activeDragSlider.value)
+        elseif activeDragName == "enemyAvoidanceRadius" then 
+            enemyAvoidanceRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_enemyAvoidanceRadius", activeDragSlider.value)
+        end
+    end
+end
+
+function widget:KeyPress(key, mods, isRepeat)
+    if key == 0x0076 and mods.alt then  -- Alt+V to toggle UI
+        showUI = not showUI
+        return true
+    elseif key == 27 then  -- Escape to close UI
+        showUI = false
+        return true
+    end
+    return false
+end
+
+
+
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- ////////////////////////////////////////- UI CODE -////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+
+
+
+-- UI Variables and Constants
+local showUI = false
+local UI = {
+    width = 300,
+    height = 400,
+    backgroundColor = {0.1, 0.1, 0.1, 0.9},
+    textColor = {1, 1, 1, 1},
+    checkboxColor = {0.3, 0.7, 0.3, 0.9},
+    sliderColor = {0.3, 0.7, 0.3, 0.9},
+    sliderKnobColor = {0.4, 0.8, 0.4, 1.0},
+    sliderKnobSize = 12,
+    padding = 20,
+    spacing = 35
+}
+
+-- Track which slider is being dragged
+local activeDragSlider = nil
+local activeDragName = nil
+
+local checkboxes = {
+    excludeBuildings = { state = false, label = "Exclude buildings from Resurrection" },
+    healing = { state = false, label = "Healing" },
+    collecting = { state = false, label = "Resource Collection" },
+    resurrecting = { state = false, label = "Resurrect" }  -- Changed from resurrect to resurrecting to match usage
+}
+
+local sliders = {
+    healResurrectRadius = { value = healResurrectRadius, min = 0, max = 2000, label = "Heal/Resurrect Radius" },
+    reclaimRadius = { value = reclaimRadius, min = 0, max = 5000, label = "Resource Collection Radius" },
+    enemyAvoidanceRadius = { value = enemyAvoidanceRadius, min = 0, max = 2000, label = "Maintain Safe Distance" }
+}
+
+-- Helper function to draw circular knob
+local function drawCircle(x, y, radius, color)
+    gl.Color(unpack(color))
+    gl.BeginEnd(GL.TRIANGLE_FAN, function()
+        gl.Vertex(x, y)
+        for i = 0, 30 do
+            local angle = (i / 30) * 2 * math.pi
+            gl.Vertex(x + math.cos(angle) * radius, 
+                     y + math.sin(angle) * radius)
+        end
+    end)
+end
+
+function widget:Initialize()
+    if Spring.GetSpectatingState() then
+        Spring.Echo("You are a spectator. Widget is disabled.")
+        widgetHandler:RemoveWidget(self)
+        return
+    end
+
+    -- Load persistent UI state
+    healResurrectRadius = Spring.GetConfigInt("scv_healResurrectRadius", healResurrectRadius)
+    reclaimRadius = Spring.GetConfigInt("scv_reclaimRadius", reclaimRadius)
+    enemyAvoidanceRadius = Spring.GetConfigInt("scv_enemyAvoidanceRadius", enemyAvoidanceRadius)
+    
+    -- Update slider values
+    sliders.healResurrectRadius.value = healResurrectRadius
+    sliders.reclaimRadius.value = reclaimRadius
+    sliders.enemyAvoidanceRadius.value = enemyAvoidanceRadius
+    
+    -- Load checkbox states
+    for k, v in pairs(checkboxes) do
+        v.state = Spring.GetConfigInt("scv_checkbox_"..k, v.state and 1 or 0) == 1
+    end
+
+    if UnitDefNames then
+        if UnitDefNames.armrectr then armRectrDefID = UnitDefNames.armrectr.id end
+        if UnitDefNames.cornecro then corNecroDefID = UnitDefNames.cornecro.id end
+        if UnitDefNames.legrezbot then legRezbotDefID = UnitDefNames.legrezbot.id end
+
+        if not (armRectrDefID or corNecroDefID or legRezbotDefID) then
+            Spring.Echo("No supported RezBot UnitDefIDs could be determined")
+            widgetHandler:RemoveWidget()
+            return
+        end
+    else
+        Spring.Echo("UnitDefNames table not found")
+        widgetHandler:RemoveWidget()
+        return
+    end
+end
+
+function widget:DrawScreen()
+    if not showUI then return end
+    
+    local vsx, vsy = Spring.GetViewGeometry()
+    local x = (vsx - UI.width) / 2
+    local y = (vsy + UI.height) / 2
+    
+    -- Draw background (single, clean background)
+    gl.Color(0.1, 0.1, 0.1, 0.9)
+    gl.Rect(x, y - UI.height, x + UI.width, y)
+    
+    -- Draw title
+    gl.Color(1, 1, 1, 1)
+    gl.Text("RezBot Settings", x + UI.padding, y - 30, 14)
+    
+    -- Draw checkboxes
+    local cy = y - 60
+    for _, box in pairs(checkboxes) do
+        -- Draw checkbox background
+        gl.Color(0.2, 0.2, 0.2, 0.8)
+        gl.Rect(x + UI.padding, cy, x + UI.padding + 16, cy + 16)
+        
+        -- Draw check if selected
+        if box.state then
+            gl.Color(0.3, 0.7, 0.3, 0.9)
+            gl.Rect(x + UI.padding + 2, cy + 2, x + UI.padding + 14, cy + 14)
+        end
+        
+        -- Draw label
+        gl.Color(1, 1, 1, 1)
+        gl.Text(box.label, x + UI.padding + 24, cy + 2, 12)
+        
+        cy = cy - UI.spacing
+    end
+    
+    -- Draw sliders
+    local sy = cy - UI.spacing
+    for _, slider in pairs(sliders) do
+        -- Draw label
+        gl.Color(1, 1, 1, 1)
+        gl.Text(slider.label, x + UI.padding, sy + 20, 12)
+        
+        -- Draw slider background
+        gl.Color(0.2, 0.2, 0.2, 0.8)
+        gl.Rect(x + UI.padding, sy, x + UI.padding + 200, sy + 6)
+        
+        -- Draw filled portion
+        local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+        gl.Color(0.3, 0.7, 0.3, 0.9)
+        gl.Rect(x + UI.padding, sy, x + UI.padding + fillWidth, sy + 6)
+        
+        -- Draw knob
+        local knobX = x + UI.padding + fillWidth
+        local knobY = sy + 3
+        
+        -- Draw knob shadow
+        drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
+        -- Draw main knob
+        drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
+        -- Draw highlight
+        drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
+        
+        -- Draw value
+        gl.Color(1, 1, 1, 1)
+        gl.Text(string.format("%.0f", slider.value), x + UI.padding + 210, sy - 2, 12)
+        
+        sy = sy - UI.spacing
+    end
+end
+
+function widget:MousePress(mx, my, button)
+    if not showUI then return false end
+    
+    local vsx, vsy = Spring.GetViewGeometry()
+    local x = (vsx - UI.width) / 2
+    local y = (vsy + UI.height) / 2
+    
+    -- Check for checkbox clicks
+    local cy = y - 60
+    for name, box in pairs(checkboxes) do
+        if mx >= x + UI.padding and mx <= x + UI.padding + 16 and
+           my >= cy and my <= cy + 16 then
+            box.state = not box.state
+            Spring.SetConfigInt("scv_checkbox_"..name, box.state and 1 or 0)
+            return true
+        end
+        cy = cy - UI.spacing
+    end
+    
+    -- Check for slider interactions with expanded hit area for knob
+    local sy = cy - UI.spacing
+    for name, slider in pairs(sliders) do
+        local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+        local knobX = x + UI.padding + fillWidth
+        local knobY = sy + 3
+        
+        -- Check if click is within knob area (slightly larger than visual size)
+        local knobHitSize = UI.sliderKnobSize + 4
+        if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
+           (mx >= x + UI.padding and mx <= x + UI.padding + 200 and
+            my >= sy - 4 and my <= sy + 10) then
+            
+            -- Start dragging this slider
+            activeDragSlider = slider
+            activeDragName = name
+            
+            -- Update the slider value
+            local ratio = (mx - (x + UI.padding)) / 200
+            ratio = math.max(0, math.min(1, ratio))
+            slider.value = mathFloor(slider.min + (slider.max - slider.min) * ratio)
+            
+            -- Update the corresponding variable
+            if name == "healResurrectRadius" then 
+                healResurrectRadius = slider.value
+                Spring.SetConfigInt("scv_healResurrectRadius", slider.value)
+            elseif name == "reclaimRadius" then 
+                reclaimRadius = slider.value
+                Spring.SetConfigInt("scv_reclaimRadius", slider.value)
+            elseif name == "enemyAvoidanceRadius" then 
+                enemyAvoidanceRadius = slider.value
+                Spring.SetConfigInt("scv_enemyAvoidanceRadius", slider.value)
+            end
+            return true
+        end
+        sy = sy - UI.spacing
+    end
+    
+    return false
+end
+
+function widget:MouseRelease(mx, my, button)
+    if activeDragSlider then
+        activeDragSlider = nil
+        activeDragName = nil
+        return true
+    end
+    return false
+end
+
+function widget:MouseMove(mx, my, dx, dy, button)
+    if not showUI then return end
+    
+    -- Only process if we're dragging a slider
+    if activeDragSlider then
+        local vsx, vsy = Spring.GetViewGeometry()
+        local x = (vsx - UI.width) / 2
+        
+        -- Calculate new slider value
+        local ratio = (mx - (x + UI.padding)) / 200
+        ratio = math.max(0, math.min(1, ratio))
+        activeDragSlider.value = mathFloor(activeDragSlider.min + (activeDragSlider.max - activeDragSlider.min) * ratio)
+        
+        -- Update the corresponding variable
         if activeDragName == "healResurrectRadius" then 
             healResurrectRadius = activeDragSlider.value
             Spring.SetConfigInt("scv_healResurrectRadius", activeDragSlider.value)
@@ -1151,14 +1508,12 @@ function findNearestDamagedFriendly(unitID, searchRadius)
       if unitDef and not unitDef.isAirUnit then -- Check if the unit is not an air unit
         local unitTeam = Spring.GetUnitTeam(otherUnitID)
         if unitTeam == myTeamID then -- Check if the unit belongs to your team
-          if (checkboxes.healCloaked.state or not (GetUnitIsCloaked and GetUnitIsCloaked(otherUnitID))) then
-            local health, maxHealth, _, _, buildProgress = Spring.GetUnitHealth(otherUnitID)
-            if health and maxHealth and health < maxHealth and buildProgress == 1 then
-              local distSq = Spring.GetUnitSeparation(unitID, otherUnitID, true)
-              if distSq < minDistSq then
-                minDistSq = distSq
-                nearestDamagedUnit = otherUnitID
-              end
+          local health, maxHealth, _, _, buildProgress = Spring.GetUnitHealth(otherUnitID)
+          if health and maxHealth and health < maxHealth and buildProgress == 1 then
+            local distSq = Spring.GetUnitSeparation(unitID, otherUnitID, true)
+            if distSq < minDistSq then
+              minDistSq = distSq
+              nearestDamagedUnit = otherUnitID
             end
           end
         end
