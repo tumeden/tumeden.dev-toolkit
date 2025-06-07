@@ -1,12 +1,12 @@
 -- // This is still work in progress.
--- /////////////////////////////////////////// Legion supported
+-- /////////////////////////////////////////// GetInfo Function
 function widget:GetInfo()
   return {
     name      = "RezBots - AGENT",
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.31",
+    version   = "v1.30",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -1024,11 +1024,6 @@ end
 
 -- ///////////////////////////////////////////  FeatureDestroyed Function
 function widget:FeatureDestroyed(featureID, allyTeam)
-  -- Early exit: only process if this feature was actually targeted by our RezBots
-  if not targetedFeatures[featureID] then
-    return  -- Not a feature we care about, skip processing
-  end
-  
   scvlog("Feature destroyed: FeatureID = " .. featureID)
   for unitID, data in pairs(unitsToCollect) do
     local unitDefID = spGetUnitDefID(unitID)
@@ -1245,29 +1240,14 @@ function findNearestEnemy(unitID, searchRadius)
       local enemyDefID = spGetUnitDefID(enemyID)
       local enemyDef = UnitDefs[enemyDefID]
       if enemyDef then
-        -- Filter out critters and other non-threatening units
-        local isThreat = false
-        if enemyDef.weapons and #enemyDef.weapons > 0 then
-          isThreat = true  -- Has weapons
-        elseif enemyDef.canCapture or enemyDef.canReclaim then
-          isThreat = true  -- Can capture/reclaim (constructor units)
-        elseif enemyDef.buildOptions and #enemyDef.buildOptions > 0 then
-          isThreat = true  -- Can build (factory/constructor)
-        end
-        
-        -- Skip non-threatening units (critters, debris, etc.)
-        if isThreat then
-          local ex, ey, ez = spGetUnitPosition(enemyID)
-          if ex and ez then
-            local distSq = (x - ex)^2 + (z - ez)^2
-            if distSq < minDistSq then
-              minDistSq = distSq
-              nearestEnemy = enemyID
-              isAirUnit = enemyDef.isAirUnit
-            end
+        local ex, ey, ez = spGetUnitPosition(enemyID)
+        if ex and ez then
+          local distSq = (x - ex)^2 + (z - ez)^2
+          if distSq < minDistSq then
+            minDistSq = distSq
+            nearestEnemy = enemyID
+            isAirUnit = enemyDef.isAirUnit
           end
-        else
-          scvlog("Ignoring non-threatening unit:", enemyID, "name:", enemyDef.name)
         end
       end
     end
