@@ -37,6 +37,7 @@ local unreachableFeatures = {}  -- [featureID] = true for features we know are u
 local manuallyCommandedUnits = {}  -- Track units that have been manually commanded by player
 local lastProgressCheck = {}  -- Track when units last made progress toward their targets
 local lastStuckCheck = {}  -- Track when each unit was last checked for being stuck
+local scriptIssuedCommands = {}  -- Track commands issued by the script itself
 local UNREACHABLE_EXPIRE_FRAMES = 3000  -- Number of frames to keep marking something as unreachable (e.g., ~2 min)
 local maxUnitsPerFeature = 4  -- Maximum units allowed to target the same feature
 local maxHealersPerUnit = 4  -- Maximum number of healers per unit
@@ -70,6 +71,18 @@ local GetUnitIsCloaked = Spring.GetUnitIsCloaked -- Added for cloaked check
 local CMD_MOVE = CMD.MOVE
 local CMD_RESURRECT = CMD.RESURRECT
 local CMD_RECLAIM = CMD.RECLAIM
+
+-- Debug: Log command IDs on startup
+local function logCommandIDs()
+  if isLoggingEnabled then
+    Spring.Echo("Command ID mappings:")
+    Spring.Echo("  CMD.MOVE =", CMD.MOVE)
+    Spring.Echo("  CMD.RESURRECT =", CMD.RESURRECT) 
+    Spring.Echo("  CMD.RECLAIM =", CMD.RECLAIM)
+    Spring.Echo("  CMD.REPAIR =", CMD.REPAIR)
+    Spring.Echo("  CMD.STOP =", CMD.STOP)
+  end
+end
 
 -- Mathematical and Table Functions
 local sqrt = math.sqrt
@@ -105,6 +118,33 @@ local function scvlog(...)
   if isLoggingEnabled then
       Spring.Echo(...)
   end
+end
+
+-- /////////////////////////////////////////// Script Command Wrapper
+-- Use this instead of Spring.GiveOrderToUnit to track script-issued commands
+local function giveScriptOrder(unitID, cmdID, cmdParams, cmdOpts)
+  local currentFrame = Spring.GetGameFrame()
+  
+  -- Clean up old entries (older than 30 frames)
+  for key, _ in pairs(scriptIssuedCommands) do
+    local frameStr = key:match("_(%d+)$")
+    if frameStr and (currentFrame - tonumber(frameStr)) > 30 then
+      scriptIssuedCommands[key] = nil
+    end
+  end
+  
+  -- Store command before issuing it - use more inclusive tracking
+  local cmdKey1 = unitID .. "_" .. cmdID .. "_" .. currentFrame
+  local cmdKey2 = unitID .. "_" .. cmdID .. "_" .. (currentFrame + 1)  -- Next frame as well
+  scriptIssuedCommands[cmdKey1] = true
+  scriptIssuedCommands[cmdKey2] = true
+  
+  Spring.Echo("SCRIPT CMD: Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
+  scvlog("Tracking script command for unit", unitID, "cmd", cmdID, "at frame", currentFrame)
+  
+  -- Issue the actual command
+  Spring.GiveOrderToUnit(unitID, cmdID, cmdParams, cmdOpts or {})
+  return cmdKey1
 end
 --
 
@@ -482,6 +522,9 @@ function widget:KeyPress(key, mods, isRepeat)
     elseif key == 0x006C and mods.alt then  -- Alt+L to toggle logging
         isLoggingEnabled = not isLoggingEnabled
         Spring.Echo("RezBots logging " .. (isLoggingEnabled and "enabled" or "disabled"))
+        if isLoggingEnabled then
+            logCommandIDs()
+        end
         return true
     elseif key == 27 then  -- Escape to close UI
         showUI = false
@@ -897,14 +940,44 @@ end
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
   -- Only track commands for our RezBots
   if isMyResbot(unitID, unitDefID) then
-    -- Mark this unit as manually commanded so automated logic won't interfere
-    manuallyCommandedUnits[unitID] = true
-    scvlog("Unit", unitID, "has been manually commanded, disabling automated behavior")
+    -- Check if this command was issued by our script
+    local currentFrame = Spring.GetGameFrame()
+    local isScriptCommand = false
     
-    -- If the unit was doing automated tasks, clean up its state
-    local unitData = unitsToCollect[unitID]
-    if unitData then
-      unitData.taskStatus = "manual_override"
+    -- Check if this matches any recent script-issued command (more flexible range)
+    for key, _ in pairs(scriptIssuedCommands) do
+      local keyUnitID, keyCmdID, keyFrame = key:match("^(%d+)_(%d+)_(%d+)$")
+      if keyUnitID and keyCmdID and keyFrame then
+        if tonumber(keyUnitID) == unitID and 
+           tonumber(keyCmdID) == cmdID and 
+           math.abs(currentFrame - tonumber(keyFrame)) <= 5 then  -- Increased to 5 frames
+          isScriptCommand = true
+          scriptIssuedCommands[key] = nil  -- Clean up this specific key
+          break
+        end
+      end
+    end
+    
+    if not isScriptCommand then
+      -- This is a player command - DETAILED DEBUG for this issue
+      Spring.Echo("=== MANUAL COMMAND DETECTED ===")
+      Spring.Echo("Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
+      Spring.Echo("Available tracked commands:")
+      for key, _ in pairs(scriptIssuedCommands) do
+        Spring.Echo("  " .. key)
+      end
+      Spring.Echo("=== END DEBUG ===")
+      
+      manuallyCommandedUnits[unitID] = true
+      scvlog("Unit", unitID, "has been manually commanded by player (cmd", cmdID, "), disabling automated behavior")
+      
+      -- If the unit was doing automated tasks, clean up its state
+      local unitData = unitsToCollect[unitID]
+      if unitData then
+        unitData.taskStatus = "manual_override"
+      end
+    else
+      scvlog("Unit", unitID, "received script command (cmd", cmdID, "), continuing automation")
     end
   end
 end
@@ -1095,7 +1168,7 @@ function widget:GameFrame(currentFrame)
                 local safeY = Spring.GetGroundHeight(safeX, safeZ)
                 
                 scvlog("Regrouping idle unit " .. unitID .. " to combat unit position")
-                Spring.GiveOrderToUnit(unitID, CMD.MOVE, {safeX, safeY, safeZ}, {})
+                giveScriptOrder(unitID, CMD.MOVE, {safeX, safeY, safeZ}, {})
                 unitData.taskStatus = "returning_to_friendly"
               end
             end
@@ -1162,16 +1235,19 @@ function findNearestEnemy(unitID, searchRadius)
   local nearestEnemy, isAirUnit = nil, false
 
   for _, enemyID in ipairs(unitsInRadius) do
-    local enemyDefID = spGetUnitDefID(enemyID)
-    local enemyDef = UnitDefs[enemyDefID]
-    if enemyDef then
-      local ex, ey, ez = spGetUnitPosition(enemyID)
-      if ex and ez then
-        local distSq = (x - ex)^2 + (z - ez)^2
-        if distSq < minDistSq then
-          minDistSq = distSq
-          nearestEnemy = enemyID
-          isAirUnit = enemyDef.isAirUnit
+    -- Validate that the enemy unit is actually alive and valid
+    if Spring.ValidUnitID(enemyID) and not Spring.GetUnitIsDead(enemyID) then
+      local enemyDefID = spGetUnitDefID(enemyID)
+      local enemyDef = UnitDefs[enemyDefID]
+      if enemyDef then
+        local ex, ey, ez = spGetUnitPosition(enemyID)
+        if ex and ez then
+          local distSq = (x - ex)^2 + (z - ez)^2
+          if distSq < minDistSq then
+            minDistSq = distSq
+            nearestEnemy = enemyID
+            isAirUnit = enemyDef.isAirUnit
+          end
         end
       end
     end
@@ -1185,6 +1261,19 @@ end
 -- ///////////////////////////////////////////  maintainSafeDistanceFromEnemy Function
 function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
   local nearestEnemy, distance, isAirUnit = findNearestEnemy(unitID, defaultAvoidanceRadius)
+  
+  -- Debug logging to track enemy detection
+  if nearestEnemy then
+    -- Debug: Check what this "enemy" actually is
+    local enemyDefID = Spring.GetUnitDefID(nearestEnemy)
+    local enemyDef = UnitDefs[enemyDefID]
+    local enemyTeam = Spring.GetUnitTeam(nearestEnemy)
+    local myTeam = Spring.GetMyTeamID()
+    local isAlly = Spring.AreTeamsAllied(myTeam, enemyTeam)
+    scvlog("Unit", unitID, "detected enemy", nearestEnemy, "at distance", distance, "avoidance radius", defaultAvoidanceRadius)
+    Spring.Echo("ENEMY DEBUG: Unit " .. nearestEnemy .. " DefID: " .. (enemyDefID or "nil") .. " Name: " .. (enemyDef and enemyDef.name or "unknown") .. " Team: " .. (enemyTeam or "nil") .. " MyTeam: " .. myTeam .. " Allied: " .. tostring(isAlly) .. " Dead: " .. tostring(Spring.GetUnitIsDead(nearestEnemy)))
+  end
+  
   if nearestEnemy and distance < defaultAvoidanceRadius then
     -- We have a close enemy; force the unit to flee
     local ux, uy, uz = Spring.GetUnitPosition(unitID)
@@ -1260,12 +1349,16 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
     end
 
     if needNewOrder then
-      Spring.GiveOrderToUnit(unitID, CMD.MOVE, {safeX, safeY, safeZ}, {})
+      scvlog("Unit", unitID, "FLEEING from enemy", nearestEnemy, "to position", safeX, safeZ)
+      giveScriptOrder(unitID, CMD.MOVE, {safeX, safeY, safeZ}, {})
       lastFleePosition[unitID] = {x = safeX, y = safeY, z = safeZ}
+    else
+      scvlog("Unit", unitID, "already fleeing, not issuing new order")
     end
 
     unitsMovingToSafety[unitID] = true
     unitData.taskStatus = "fleeing"
+    scvlog("Unit", unitID, "taskStatus set to fleeing")
     return true
   else
     -- No close enemy or safe enough distance
@@ -1436,7 +1529,7 @@ function performHealing(unitID, unitData)
       
       if healingTargets[nearestDamagedUnit] < maxHealersPerUnit and not healingUnits[unitID] then
           scvlog("Unit", unitID, "is healing unit", nearestDamagedUnit)
-          Spring.GiveOrderToUnit(unitID, CMD.REPAIR, {nearestDamagedUnit}, {})
+          giveScriptOrder(unitID, CMD.REPAIR, {nearestDamagedUnit}, {})
           healingUnits[unitID] = nearestDamagedUnit
           healingTargets[nearestDamagedUnit] = healingTargets[nearestDamagedUnit] + 1
           unitData.taskType = "healing"
@@ -1475,7 +1568,7 @@ function performCollection(unitID, unitData)
 
   if featureID and Spring.ValidFeatureID(featureID) then
       scvlog("Unit", unitID, "is reclaiming feature", featureID)
-      spGiveOrderToUnit(unitID, CMD.RECLAIM, {featureID + Game.maxUnits}, {})
+      giveScriptOrder(unitID, CMD.RECLAIM, {featureID + Game.maxUnits}, {})
       unitData.featureCount       = 1
       unitData.lastReclaimedFrame = Spring.GetGameFrame()
       unitData.featureID          = featureID  -- Store the target feature ID
@@ -1513,7 +1606,7 @@ function performResurrection(unitID, unitData)
               if feature.customParams["category"] == "corpses" then
                   if Spring.ValidFeatureID(featureID) and (not targetedFeatures[featureID] or targetedFeatures[featureID] < maxUnitsPerFeature) then
                       scvlog("Unit", unitID, "is resurrecting feature", featureID)
-                      spGiveOrderToUnit(unitID, CMD.RESURRECT, {featureID + Game.maxUnits}, {})
+                      giveScriptOrder(unitID, CMD.RESURRECT, {featureID + Game.maxUnits}, {})
                       unitData.featureID = featureID  -- Store the target feature ID
                       unitData.taskType = "resurrecting"
                       unitData.taskStatus = "in_progress"
@@ -1822,7 +1915,7 @@ function handleStuckUnits(unitID, unitDef)
           end
 
           -- 2) Force the stuck unit to STOP
-          Spring.GiveOrderToUnit(unitID, CMD.STOP, {}, {})
+          giveScriptOrder(unitID, CMD.STOP, {}, {})
 
           -- 3) Reset the unit's data to idle
           unitsToCollect[unitID] = {
