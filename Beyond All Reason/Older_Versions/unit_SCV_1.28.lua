@@ -6,7 +6,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.30",
+    version   = "v1.28",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -34,16 +34,12 @@ local unitLastPosition = {} -- Track the last position of each unit
 local targetedFeatures = {}  -- Table to keep track of targeted features
 local healingTargets = {}  -- Track which units are being healed and by how many healers
 local unreachableFeatures = {}  -- [featureID] = true for features we know are unreachable
-local manuallyCommandedUnits = {}  -- Track units that have been manually commanded by player
-local lastProgressCheck = {}  -- Track when units last made progress toward their targets
-local lastStuckCheck = {}  -- Track when each unit was last checked for being stuck
 local UNREACHABLE_EXPIRE_FRAMES = 3000  -- Number of frames to keep marking something as unreachable (e.g., ~2 min)
 local maxUnitsPerFeature = 4  -- Maximum units allowed to target the same feature
 local maxHealersPerUnit = 4  -- Maximum number of healers per unit
 local healResurrectRadius = 1000 -- Set your desired heal/resurrect radius here  (default 1000)
 local reclaimRadius = 1500 -- Set your desired reclaim radius here (any number works, 4000 is about half a large map)
 local enemyAvoidanceRadius = 675  -- Adjust this value as needed -- Define a safe distance for enemy avoidance
-local idleRegroupRadius = 3500 -- Radius to search for allied units when idle (default 3500)
 local IDLE_TIMEOUT_FRAMES = 15 * 30 -- 30 seconds at 30fps; adjust as needed
 local lastIdleFrame = {} -- Track when each unit became idle
 local lastFleePosition = {} -- Track last flee position for each unit
@@ -107,6 +103,7 @@ local function scvlog(...)
   end
 end
 --
+
 
 -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
 -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
@@ -479,9 +476,385 @@ function widget:KeyPress(key, mods, isRepeat)
     if key == 0x0076 and mods.alt then  -- Alt+V to toggle UI
         showUI = not showUI
         return true
-    elseif key == 0x006C and mods.alt then  -- Alt+L to toggle logging
-        isLoggingEnabled = not isLoggingEnabled
-        Spring.Echo("RezBots logging " .. (isLoggingEnabled and "enabled" or "disabled"))
+    elseif key == 27 then  -- Escape to close UI
+        showUI = false
+        return true
+    end
+    return false
+end
+
+
+
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- ////////////////////////////////////////- UI CODE -////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+-- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
+
+
+
+-- UI Variables and Constants
+local showUI = false
+local UI = {
+    width = 340,
+    height = 640,
+    backgroundColor = {0.1, 0.1, 0.1, 0.9},
+    textColor = {1, 1, 1, 1},
+    sectionHeaderColor = {0.8, 0.9, 1, 1},
+    sectionBgColor = {0.15, 0.15, 0.18, 0.62}, -- middleground opacity
+    checkboxColor = {0.3, 0.7, 0.3, 0.9},
+    sliderColor = {0.3, 0.7, 0.3, 0.9},
+    sliderKnobColor = {0.4, 0.8, 0.4, 1.0},
+    sliderKnobSize = 12,
+    padding = 24,
+    spacing = 35,
+    sectionSpacing = 44,
+    sectionHeaderSize = 16,
+    sectionGap = 8 -- new: vertical gap between sections
+}
+
+-- Movable UI state
+local uiPosX = 0.5 -- normalized (0 = left, 1 = right)
+local uiPosY = 0.7 -- normalized (0 = bottom, 1 = top)
+local isDraggingUI = false
+local dragOffsetX, dragOffsetY = 0, 0
+
+-- Track which slider is being dragged
+local activeDragSlider = nil
+local activeDragName = nil
+
+-- Commander names table (dynamically built in widget:Initialize)
+local commanderNames = {}
+
+local checkboxes = {
+    excludeBuildings = { state = false, label = "Exclude buildings from Resurrection" },
+    healing = { state = false, label = "Healing" },
+    collecting = { state = false, label = "Resource Collection" },
+    resurrecting = { state = false, label = "Resurrect" },
+    healCloaked = { state = false, label = "Heal Cloaked Units" },
+    excludeCommanders = { state = true, label = "Exclude Commanders from Collection" } -- New toggle, default enabled
+}
+
+local sliders = {
+    healResurrectRadius = { value = healResurrectRadius, min = 0, max = 2000, label = "Heal/Resurrect Radius" },
+    reclaimRadius = { value = reclaimRadius, min = 0, max = 5000, label = "Resource Collection Radius" },
+    enemyAvoidanceRadius = { value = enemyAvoidanceRadius, min = 0, max = 2000, label = "Maintain Safe Distance" }
+}
+
+-- Helper function to draw circular knob
+local function drawCircle(x, y, radius, color)
+    gl.Color(unpack(color))
+    gl.BeginEnd(GL.TRIANGLE_FAN, function()
+        gl.Vertex(x, y)
+        for i = 0, 30 do
+            local angle = (i / 30) * 2 * math.pi
+            gl.Vertex(x + math.cos(angle) * radius, 
+                     y + math.sin(angle) * radius)
+        end
+    end)
+end
+
+function widget:Initialize()
+    if Spring.GetSpectatingState() then
+        Spring.Echo("You are a spectator. Widget is disabled.")
+        widgetHandler:RemoveWidget(self)
+        return
+    end
+
+    -- Load persistent UI state
+    healResurrectRadius = Spring.GetConfigInt("scv_healResurrectRadius", healResurrectRadius)
+    reclaimRadius = Spring.GetConfigInt("scv_reclaimRadius", reclaimRadius)
+    enemyAvoidanceRadius = Spring.GetConfigInt("scv_enemyAvoidanceRadius", enemyAvoidanceRadius)
+    
+    -- Load UI position (normalized)
+    uiPosX = Spring.GetConfigFloat("scv_uiPosX", uiPosX)
+    uiPosY = Spring.GetConfigFloat("scv_uiPosY", uiPosY)
+    
+    -- Update slider values
+    sliders.healResurrectRadius.value = healResurrectRadius
+    sliders.reclaimRadius.value = reclaimRadius
+    sliders.enemyAvoidanceRadius.value = enemyAvoidanceRadius
+    
+    -- Load checkbox states
+    for k, v in pairs(checkboxes) do
+        v.state = Spring.GetConfigInt("scv_checkbox_"..k, v.state and 1 or 0) == 1
+    end
+
+    if UnitDefNames then
+        if UnitDefNames.armrectr then armRectrDefID = UnitDefNames.armrectr.id end
+        if UnitDefNames.cornecro then corNecroDefID = UnitDefNames.cornecro.id end
+        if UnitDefNames.legrezbot then legRezbotDefID = UnitDefNames.legrezbot.id end
+
+        if not (armRectrDefID or corNecroDefID or legRezbotDefID) then
+            Spring.Echo("No supported RezBot UnitDefIDs could be determined")
+            widgetHandler:RemoveWidget()
+            return
+        end
+        -- Dynamically build commanderNames table
+        commanderNames.armcom = true
+        commanderNames.corcom = true
+        if legRezbotDefID then
+            commanderNames.legcom = true
+        else
+            commanderNames.legcom = nil
+        end
+    else
+        Spring.Echo("UnitDefNames table not found")
+        widgetHandler:RemoveWidget()
+        return
+    end
+end
+
+local uiHitboxes = {}
+
+function widget:DrawScreen()
+    if not showUI then return end
+    uiHitboxes = {} -- reset hitboxes each frame
+    local vsx, vsy = Spring.GetViewGeometry()
+    -- Section layout constants
+    local sectionPad = 4 -- reduced top padding above header
+    local sectionGap = UI.sectionGap
+    local headerH = 26 -- slimmer header background
+    local boxH = 16
+    local sliderH = 26
+    local spacing = UI.spacing
+    local sectionW = UI.width - 32
+    -- Section definitions
+    local sections = {
+        {
+            name = "Healing",
+            mainToggle = "healing",
+            options = {"healCloaked"},
+            slider = sliders.healResurrectRadius,
+        },
+        {
+            name = "Resurrection",
+            mainToggle = "resurrecting",
+            options = {"excludeBuildings"},
+            slider = nil,
+        },
+        {
+            name = "Resource Collection",
+            mainToggle = "collecting",
+            options = {"excludeCommanders"},
+            slider = sliders.reclaimRadius,
+        },
+        {
+            name = "Safety",
+            mainToggle = nil,
+            options = {},
+            slider = sliders.enemyAvoidanceRadius,
+        },
+    }
+    -- Calculate section heights dynamically
+    local sectionHeights = {}
+    for i, sec in ipairs(sections) do
+        local optCount = #sec.options
+        local hasSlider = sec.slider ~= nil
+        local optionPad = 0
+        if optCount > 0 then
+            optionPad = 18
+        elseif hasSlider then
+            optionPad = 32
+        else
+            optionPad = 18
+        end
+        local sliderHgt = hasSlider and sliderH or 0
+        sectionHeights[i] = headerH + sectionPad + optionPad + (optCount * spacing) + sliderHgt + sectionPad
+        sections[i].optionPad = optionPad -- store for use in drawing
+    end
+    -- Calculate total height
+    local totalHeight = 30 -- title bar
+    for i, h in ipairs(sectionHeights) do
+        totalHeight = totalHeight + h
+        if i < #sectionHeights then totalHeight = totalHeight + sectionGap end
+    end
+    UI.height = totalHeight
+    local x = math.floor(uiPosX * vsx - UI.width / 2)
+    local y = math.floor(uiPosY * vsy + UI.height / 2)
+    -- Draw main background
+    gl.Color(UI.backgroundColor[1], UI.backgroundColor[2], UI.backgroundColor[3], UI.backgroundColor[4])
+    gl.Rect(x, y - UI.height, x + UI.width, y)
+    -- Draw title bar
+    gl.Color(0.18, 0.18, 0.18, 1)
+    gl.Rect(x, y - 30, x + UI.width, y)
+    gl.Color(1, 1, 1, 1)
+    gl.Text("RezBot Settings (" .. widgetVersion .. ")", x + UI.width/2 - 90, y - 30 + 8, 14, "o")
+    -- Draw sections
+    local cy = y - 30
+    local sectionX = x + (UI.width - sectionW) / 2
+    local borderColor = {0.4, 0.6, 0.9, 0.45}
+    for i, sec in ipairs(sections) do
+        local secH = sectionHeights[i]
+        local secTop = cy
+        local secBot = cy - secH
+        -- Section background
+        gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], UI.sectionBgColor[4])
+        gl.Rect(sectionX, secBot, sectionX + sectionW, secTop)
+        -- Border
+        gl.Color(borderColor[1], borderColor[2], borderColor[3], borderColor[4])
+        gl.LineWidth(1.5)
+        gl.Rect(sectionX + 0.5, secBot + 0.5, sectionX + sectionW - 0.5, secTop - 0.5)
+        gl.LineWidth(1)
+        -- Header background
+        local headerTop = secTop - sectionPad
+        local headerBot = headerTop - headerH
+        gl.Color(0.18, 0.22, 0.32, 0.82)
+        gl.Rect(sectionX, headerBot, sectionX + sectionW, headerTop)
+        -- Header text and main toggle (checkbox)
+        local headerCenterY = (headerTop + headerBot) / 2
+        local headerX = x + UI.width/2 -- center header text
+        local checkX = x + UI.padding
+        local checkY = headerCenterY - boxH/2
+        if sec.mainToggle then
+            gl.Color(0.2, 0.2, 0.2, 0.8)
+            gl.Rect(checkX, checkY, checkX + boxH, checkY + boxH)
+            if checkboxes[sec.mainToggle].state then
+                gl.Color(0.3, 0.7, 0.3, 0.9)
+                gl.Rect(checkX + 2, checkY + 2, checkX + boxH - 2, checkY + boxH - 2)
+            end
+            -- Store hitbox for main toggle
+            table.insert(uiHitboxes, {type="checkbox", name=sec.mainToggle, x1=checkX, y1=checkY, x2=checkX+boxH, y2=checkY+boxH})
+        end
+        gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
+        -- Center header text
+        local headerText = sec.name
+        local headerTextWidth = gl.GetTextWidth(headerText) * UI.sectionHeaderSize
+        gl.Text(headerText, headerX - headerTextWidth/2, headerCenterY - UI.sectionHeaderSize/2 + 2, UI.sectionHeaderSize, "o")
+        -- Section content
+        local contentY = headerBot - sec.optionPad
+        for _, name in ipairs(sec.options) do
+            local box = checkboxes[name]
+            local cx = x + UI.padding
+            gl.Color(0.2, 0.2, 0.2, 0.8)
+            gl.Rect(cx, contentY, cx + boxH, contentY + boxH)
+            if box.state then
+                gl.Color(0.3, 0.7, 0.3, 0.9)
+                gl.Rect(cx + 2, contentY + 2, cx + boxH - 2, contentY + boxH - 2)
+            end
+            gl.Color(1, 1, 1, 1)
+            gl.Text(box.label, cx + 24, contentY + 2, 12)
+            -- Store hitbox for option checkbox
+            table.insert(uiHitboxes, {type="checkbox", name=name, x1=cx, y1=contentY, x2=cx+boxH, y2=contentY+boxH})
+            contentY = contentY - spacing
+        end
+        if sec.slider then
+            local slider = sec.slider
+            local sliderX = x + UI.padding
+            gl.Color(1, 1, 1, 1)
+            gl.Text(slider.label, sliderX, contentY + 20, 12)
+            gl.Color(0.2, 0.2, 0.2, 0.8)
+            gl.Rect(sliderX, contentY, sliderX + 200, contentY + 6)
+            local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+            gl.Color(0.3, 0.7, 0.3, 0.9)
+            gl.Rect(sliderX, contentY, sliderX + fillWidth, contentY + 6)
+            local knobX = sliderX + fillWidth
+            local knobY = contentY + 3
+            drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
+            drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
+            drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
+            gl.Color(1, 1, 1, 1)
+            gl.Text(string.format("%.0f", slider.value), sliderX + 210, contentY - 2, 12)
+            -- Store hitbox for slider knob and bar
+            local knobHitSize = UI.sliderKnobSize + 4
+            table.insert(uiHitboxes, {type="slider", name=slider.label, slider=slider, x1=sliderX, y1=contentY-4, x2=sliderX+200, y2=contentY+10, knobX=knobX, knobY=knobY, knobR=knobHitSize})
+            contentY = contentY - sliderH
+        end
+        cy = secBot - sectionGap
+    end
+end
+
+function widget:MousePress(mx, my, button)
+    if not showUI then return false end
+    local vsx, vsy = Spring.GetViewGeometry()
+    local x = math.floor(uiPosX * vsx - UI.width / 2)
+    local y = math.floor(uiPosY * vsy + UI.height / 2)
+    -- Check for title bar drag
+    if mx >= x and mx <= x + UI.width and my >= y - 30 and my <= y then
+        isDraggingUI = true
+        dragOffsetX = mx - x
+        dragOffsetY = my - y
+        return true
+    end
+    -- Use dynamic hitboxes
+    for _, hit in ipairs(uiHitboxes) do
+        if hit.type == "checkbox" then
+            if mx >= hit.x1 and mx <= hit.x2 and my >= hit.y1 and my <= hit.y2 then
+                checkboxes[hit.name].state = not checkboxes[hit.name].state
+                Spring.SetConfigInt("scv_checkbox_"..hit.name, checkboxes[hit.name].state and 1 or 0)
+                return true
+            end
+        elseif hit.type == "slider" then
+            -- Check knob first
+            if (mx - hit.knobX)^2 + (my - hit.knobY)^2 <= (hit.knobR)^2 or
+               (mx >= hit.x1 and mx <= hit.x2 and my >= hit.y1 and my <= hit.y2) then
+                activeDragSlider = hit.slider
+                activeDragName = hit.name
+                local ratio = (mx - hit.x1) / 200
+                ratio = math.max(0, math.min(1, ratio))
+                hit.slider.value = mathFloor(hit.slider.min + (hit.slider.max - hit.slider.min) * ratio)
+                if hit.slider == sliders.healResurrectRadius then
+                    healResurrectRadius = hit.slider.value
+                    Spring.SetConfigInt("scv_healResurrectRadius", hit.slider.value)
+                elseif hit.slider == sliders.reclaimRadius then
+                    reclaimRadius = hit.slider.value
+                    Spring.SetConfigInt("scv_reclaimRadius", hit.slider.value)
+                elseif hit.slider == sliders.enemyAvoidanceRadius then
+                    enemyAvoidanceRadius = hit.slider.value
+                    Spring.SetConfigInt("scv_enemyAvoidanceRadius", hit.slider.value)
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function widget:MouseRelease(mx, my, button)
+    if isDraggingUI then
+        isDraggingUI = false
+        -- Save position
+        Spring.SetConfigFloat("scv_uiPosX", uiPosX)
+        Spring.SetConfigFloat("scv_uiPosY", uiPosY)
+        return true
+    end
+    if activeDragSlider then
+        activeDragSlider = nil
+        activeDragName = nil
+        return true
+    end
+    return false
+end
+
+function widget:MouseMove(mx, my, dx, dy, button)
+    if not showUI then return end
+    local vsx, vsy = Spring.GetViewGeometry()
+    if isDraggingUI then
+        uiPosX = math.max(0, math.min(1, (mx - dragOffsetX + UI.width / 2) / vsx))
+        uiPosY = math.max(0, math.min(1, (my - dragOffsetY - UI.height / 2) / vsy))
+    end
+    -- Only process if we're dragging a slider
+    if activeDragSlider then
+        local x = math.floor(uiPosX * vsx - UI.width / 2)
+        local ratio = (mx - (x + UI.padding)) / 200
+        ratio = math.max(0, math.min(1, ratio))
+        activeDragSlider.value = mathFloor(activeDragSlider.min + (activeDragSlider.max - activeDragSlider.min) * ratio)
+        if activeDragName == "healResurrectRadius" then 
+            healResurrectRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_healResurrectRadius", activeDragSlider.value)
+        elseif activeDragName == "reclaimRadius" then 
+            reclaimRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_reclaimRadius", activeDragSlider.value)
+        elseif activeDragName == "enemyAvoidanceRadius" then 
+            enemyAvoidanceRadius = activeDragSlider.value
+            Spring.SetConfigInt("scv_enemyAvoidanceRadius", activeDragSlider.value)
+        end
+    end
+end
+
+function widget:KeyPress(key, mods, isRepeat)
+    if key == 0x0076 and mods.alt then  -- Alt+V to toggle UI
+        showUI = not showUI
         return true
     elseif key == 27 then  -- Escape to close UI
         showUI = false
@@ -892,23 +1265,6 @@ function processUnits(units)
 end
 
 
--- ///////////////////////////////////////////  UnitCommand Function
--- Detects when a player manually commands a unit
-function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
-  -- Only track commands for our RezBots
-  if isMyResbot(unitID, unitDefID) then
-    -- Mark this unit as manually commanded so automated logic won't interfere
-    manuallyCommandedUnits[unitID] = true
-    scvlog("Unit", unitID, "has been manually commanded, disabling automated behavior")
-    
-    -- If the unit was doing automated tasks, clean up its state
-    local unitData = unitsToCollect[unitID]
-    if unitData then
-      unitData.taskStatus = "manual_override"
-    end
-  end
-end
-
 -- ///////////////////////////////////////////  UnitCreated/Destroyed Function
 function widget:UnitCreated(unitID, unitDefID, unitTeam)
   if isMyResbot(unitID, unitDefID) then  -- Use isMyResbot to check if the unit is a Resbot
@@ -925,26 +1281,6 @@ end
 function widget:UnitDestroyed(unitID, unitDefID, teamID)
   if unitsToCollect[unitID] then
       unitsToCollect[unitID] = nil
-  end
-  
-  -- Clean up manual command tracking
-  if manuallyCommandedUnits[unitID] then
-      manuallyCommandedUnits[unitID] = nil
-  end
-  
-  -- Clean up progress tracking
-  if lastProgressCheck[unitID] then
-      lastProgressCheck[unitID] = nil
-  end
-  
-  -- Clean up stuck check tracking
-  if lastStuckCheck[unitID] then
-      lastStuckCheck[unitID] = nil
-  end
-  
-  -- Clean up position tracking
-  if unitLastPosition[unitID] then
-      unitLastPosition[unitID] = nil
   end
 end
 
@@ -972,7 +1308,7 @@ end
 
 -- /////////////////////////////////////////// GameFrame Function
 function widget:GameFrame(currentFrame)
-  local stuckCheckInterval     = 300   -- Reduced from 1000 to 300 (10 seconds instead of 33)
+  local stuckCheckInterval     = 1000
   local resourceCheckInterval  = 150   -- Interval to check and reassign tasks
   local actionInterval         = 30
 
@@ -982,22 +1318,17 @@ function widget:GameFrame(currentFrame)
       local unitDefID = Spring.GetUnitDefID(unitID)
       if isMyResbot(unitID, unitDefID) then
         if Spring.ValidUnitID(unitID) and not Spring.GetUnitIsDead(unitID) then
-          -- Skip all automated logic if unit has been manually commanded
-          if not manuallyCommandedUnits[unitID] then
-            ----------------------------------------------------------------------
-            -- (A) Check for nearby enemies and possibly flee
-            ----------------------------------------------------------------------
-            local isFleeing = maintainSafeDistanceFromEnemy(unitID, unitData, enemyAvoidanceRadius)
+          ----------------------------------------------------------------------
+          -- (A) Check for nearby enemies and possibly flee
+          ----------------------------------------------------------------------
+          local isFleeing = maintainSafeDistanceFromEnemy(unitID, unitData, enemyAvoidanceRadius)
 
-            ----------------------------------------------------------------------
-            -- (B) If not fleeing, handle tasks if idle or completed
-            ----------------------------------------------------------------------
-            if (not isFleeing) and 
-               (unitData.taskStatus == "idle" or unitData.taskStatus == "completed") then
-              processUnits({ [unitID] = unitData })
-            end
-          else
-            scvlog("Skipping automated logic for manually commanded unit", unitID)
+          ----------------------------------------------------------------------
+          -- (B) If not fleeing, handle tasks if idle or completed
+          ----------------------------------------------------------------------
+          if (not isFleeing) and 
+             (unitData.taskStatus == "idle" or unitData.taskStatus == "completed") then
+            processUnits({ [unitID] = unitData })
           end
         end
       end
@@ -1009,10 +1340,7 @@ function widget:GameFrame(currentFrame)
     for unitID, _ in pairs(unitsToCollect) do
       local unitDefID = Spring.GetUnitDefID(unitID)
       if isMyResbot(unitID, unitDefID) then
-        -- Only check for stuck units if they're not manually commanded
-        if not manuallyCommandedUnits[unitID] then
-          handleStuckUnits(unitID, UnitDefs[unitDefID])
-        end
+        handleStuckUnits(unitID, UnitDefs[unitDefID])
       end
     end
   end
@@ -1023,9 +1351,7 @@ function widget:GameFrame(currentFrame)
     if resourceNeed ~= "full" then
       for unitID, unitData in pairs(unitsToCollect) do
         -- If the unit is idle or completed, see if there's something to do
-        -- But only if not manually commanded
-        if (unitData.taskStatus == "idle" or unitData.taskStatus == "completed") and 
-           not manuallyCommandedUnits[unitID] then
+        if (unitData.taskStatus == "idle") or (unitData.taskStatus == "completed") then
           processUnits({ [unitID] = unitData })
         end
       end
@@ -1046,8 +1372,8 @@ function widget:GameFrame(currentFrame)
   for unitID, unitData in pairs(unitsToCollect) do
     local unitDefID = spGetUnitDefID(unitID)
     if isMyResbot(unitID, unitDefID) then
-      -- Only handle truly idle units that haven't been manually commanded
-      if unitData.taskStatus == "idle" and not manuallyCommandedUnits[unitID] then
+      -- Only handle truly idle units
+      if unitData.taskStatus == "idle" then
         -- Don't check if unit is already fleeing or returning
         if not unitsMovingToSafety[unitID] and unitData.taskStatus ~= "returning_to_friendly" then
           local last = lastIdleFrame[unitID] or currentFrame
@@ -1056,7 +1382,7 @@ function widget:GameFrame(currentFrame)
             if ux and uz then -- Sanity check
               -- Find nearest valid combat unit
               local myTeamID = Spring.GetMyTeamID()
-              local searchRadius = idleRegroupRadius -- Use configurable idle regroup radius
+              local searchRadius = 2000 -- Large search radius for idle regroup
               local unitsInRadius = Spring.GetUnitsInCylinder(ux, uz, searchRadius)
               local minDistSq = math.huge
               local nearestCombatUnit = nil
@@ -1342,11 +1668,8 @@ function findReclaimableFeature(unitID, x, z, searchRadius, needMetal, needEnerg
   end
 
   local bestFeature = nil
-  local bestScore = math.huge
-  local maxFeaturesToConsider = 25  -- Maximum number of features to consider
-  local nearestFeatures = {}
+  local bestScore   = math.huge
 
-  -- First pass: collect distances and initial filtering
   for _, featureID in ipairs(featuresInRadius) do
       -------------------------------------------------------
       -- 1) Check if we already marked this feature unreachable
@@ -1360,59 +1683,28 @@ function findReclaimableFeature(unitID, x, z, searchRadius, needMetal, needEnerg
                   local isCommanderWreck = checkboxes.excludeCommanders.state and fDef.customParams and fDef.customParams.fromunit and commanderNames[fDef.customParams.fromunit]
                   if not isCommanderWreck then
                       local fx, _, fz = Spring.GetFeaturePosition(featureID)
-                      local distSq = (x - fx)^2 + (z - fz)^2
-                      local fMetal = fDef.metal or 0
-                      local fEnergy = fDef.energy or 0
-                      local effectiveMetal = needMetal and fMetal or 0
+                      local dist      = math.sqrt((x - fx)^2 + (z - fz)^2)
+                      local fMetal    = fDef.metal  or 0
+                      local fEnergy   = fDef.energy or 0
+
+                      local effectiveMetal  = needMetal  and fMetal  or 0
                       local effectiveEnergy = needEnergy and fEnergy or 0
 
                       if (effectiveMetal + effectiveEnergy) > 0 then
-                          -- Store feature data if it has resources we need
-                          if #nearestFeatures < maxFeaturesToConsider then
-                              table.insert(nearestFeatures, {
-                                  id = featureID,
-                                  distSq = distSq,
-                                  metal = effectiveMetal,
-                                  energy = effectiveEnergy
-                              })
-                          else
-                              -- Replace the worst scoring feature if this one is better
-                              local worstIdx, worstScore = 1, -math.huge
-                              for i, feat in ipairs(nearestFeatures) do
-                                  local score = feat.distSq * dynamicWeightDistance - (feat.metal + feat.energy)
-                                  if score > worstScore then
-                                      worstIdx = i
-                                      worstScore = score
-                                  end
-                              end
-                              
-                              local newScore = distSq * dynamicWeightDistance - (effectiveMetal + effectiveEnergy)
-                              if newScore < worstScore then
-                                  nearestFeatures[worstIdx] = {
-                                      id = featureID,
-                                      distSq = distSq,
-                                      metal = effectiveMetal,
-                                      energy = effectiveEnergy
-                                  }
-                              end
+                          local score = dist * dynamicWeightDistance
+                          score       = score - (effectiveMetal + effectiveEnergy)
+
+                          -- Also ensure we haven't exceeded maxUnitsPerFeature
+                          local alreadyTargetedCount = targetedFeatures[featureID] or 0
+                          if (score < bestScore) and (alreadyTargetedCount < maxUnitsPerFeature) then
+                              bestScore   = score
+                              bestFeature = featureID
                           end
                       end
                   else
                       scvlog("Skipping commander wreck for featureID", featureID)
                   end
               end
-          end
-      end
-  end
-
-  -- Second pass: find the best feature among the nearest ones
-  for _, feat in ipairs(nearestFeatures) do
-      local alreadyTargetedCount = targetedFeatures[feat.id] or 0
-      if alreadyTargetedCount < maxUnitsPerFeature then
-          local score = feat.distSq * dynamicWeightDistance - (feat.metal + feat.energy)
-          if score < bestScore then
-              bestScore = score
-              bestFeature = feat.id
           end
       end
   end
@@ -1478,7 +1770,6 @@ function performCollection(unitID, unitData)
       spGiveOrderToUnit(unitID, CMD.RECLAIM, {featureID + Game.maxUnits}, {})
       unitData.featureCount       = 1
       unitData.lastReclaimedFrame = Spring.GetGameFrame()
-      unitData.featureID          = featureID  -- Store the target feature ID
       targetedFeatures[featureID] = (targetedFeatures[featureID] or 0) + 1
       unitData.taskType           = "reclaiming"
       unitData.taskStatus         = "in_progress"
@@ -1514,7 +1805,6 @@ function performResurrection(unitID, unitData)
                   if Spring.ValidFeatureID(featureID) and (not targetedFeatures[featureID] or targetedFeatures[featureID] < maxUnitsPerFeature) then
                       scvlog("Unit", unitID, "is resurrecting feature", featureID)
                       spGiveOrderToUnit(unitID, CMD.RESURRECT, {featureID + Game.maxUnits}, {})
-                      unitData.featureID = featureID  -- Store the target feature ID
                       unitData.taskType = "resurrecting"
                       unitData.taskStatus = "in_progress"
                       resurrectingUnits[unitID] = true
@@ -1631,12 +1921,6 @@ function widget:UnitIdle(unitID)
     scvlog("Setting taskStatus to idle for UnitID:", unitID)
   end
 
-  -- Clear manual command flag when unit becomes idle
-  if manuallyCommandedUnits[unitID] then
-    manuallyCommandedUnits[unitID] = nil
-    scvlog("Unit", unitID, "is now idle, re-enabling automated behavior")
-  end
-
   -- Immediately reassign a new task for the unit
   if (unitDef.canReclaim and checkboxes.collecting.state) or
      (unitDef.canResurrect and checkboxes.resurrecting.state) or
@@ -1647,7 +1931,7 @@ function widget:UnitIdle(unitID)
 
   -- Clear any lingering target associations
   if unitData.featureID then
-    scvlog("Handling targeted feature for UnitID:", unitID, "featureID:", unitData.featureID)
+    scvlog("Handling targeted feature for UnitID:", unitID)
     targetedFeatures[unitData.featureID] = (targetedFeatures[unitData.featureID] or 0) - 1
     if targetedFeatures[unitData.featureID] <= 0 then
       targetedFeatures[unitData.featureID] = nil
@@ -1676,7 +1960,8 @@ end
 
 
 -- ///////////////////////////////////////////  isUnitStuck Function
-local checkInterval = 150  -- Reduced from 500 to 150 frames (5 seconds instead of 16)
+local lastStuckCheck = {}
+local checkInterval = 500  -- Number of game frames to wait between checks
 
 function isUnitStuck(unitID)
   local currentFrame = Spring.GetGameFrame()
@@ -1687,77 +1972,16 @@ function isUnitStuck(unitID)
 
   lastStuckCheck[unitID] = currentFrame
 
-  local minMoveDistance = 0.8  -- Further reduced for even more sensitive detection
+  local minMoveDistance = 2  -- Define the minimum move distance, adjust as needed
   local x, y, z = spGetUnitPosition(unitID)
   local lastPos = unitLastPosition[unitID] or {x = x, y = y, z = z}
-  local distanceMoved = math.sqrt((lastPos.x - x)^2 + (lastPos.z - z)^2)
-  local stuck = distanceMoved < minMoveDistance
-  
-  -- Additional check: if unit is actively trying to reclaim/resurrect but hasn't moved much
-  local unitData = unitsToCollect[unitID]
-  if unitData and unitData.taskStatus == "in_progress" then
-      -- Check if unit has current commands (trying to do something but can't reach it)
-      local commands = Spring.GetUnitCommands(unitID, 1)
-      if commands and #commands > 0 then
-          local cmd = commands[1]
-          -- If unit has reclaim or resurrect command but is stuck, it's likely an unreachable target
-          if cmd.id == CMD.RECLAIM or cmd.id == CMD.RESURRECT then
-              -- Track progress toward target
-              local targetDistance = nil
-              if cmd.params and #cmd.params >= 3 then
-                  local tx, tz = cmd.params[1], cmd.params[3]
-                  targetDistance = math.sqrt((x - tx)^2 + (z - tz)^2)
-              end
-              
-              local progressData = lastProgressCheck[unitID]
-              if not progressData then
-                  lastProgressCheck[unitID] = {
-                      lastDistance = targetDistance or 9999,
-                      lastFrame = currentFrame,
-                      stuckFrames = 0
-                  }
-              else
-                  -- Check if we're making progress toward target
-                  local madeProgress = false
-                  if targetDistance and progressData.lastDistance then
-                      madeProgress = (progressData.lastDistance - targetDistance) > 0.5
-                  end
-                  
-                  if madeProgress or distanceMoved > 1.0 then
-                      -- Reset stuck counter if making progress
-                      progressData.stuckFrames = 0
-                      progressData.lastDistance = targetDistance
-                      progressData.lastFrame = currentFrame
-                  else
-                      -- Increment stuck counter
-                      progressData.stuckFrames = progressData.stuckFrames + (currentFrame - progressData.lastFrame)
-                      progressData.lastFrame = currentFrame
-                      
-                      -- If stuck for more than 3 seconds (90 frames), consider it unreachable
-                      if progressData.stuckFrames > 90 then
-                          scvlog("Unit", unitID, "hasn't made progress for", progressData.stuckFrames, "frames - unreachable target")
-                          unitLastPosition[unitID] = {x = x, y = y, z = z}
-                          lastProgressCheck[unitID] = nil  -- Reset
-                          return true
-                      end
-                  end
-              end
-          end
-      else
-          -- No commands, reset progress tracking
-          lastProgressCheck[unitID] = nil
-      end
-  else
-      -- Not in progress, reset progress tracking
-      lastProgressCheck[unitID] = nil
-  end
-  
+  local stuck = (math.abs(lastPos.x - x)^2 + math.abs(lastPos.z - z)^2) < minMoveDistance^2
   unitLastPosition[unitID] = {x = x, y = y, z = z}
 
   if stuck then
-    scvlog("Unit is stuck: UnitID = " .. unitID, "distance moved:", distanceMoved)
+    scvlog("Unit is stuck: UnitID = " .. unitID)
   else
-    scvlog("Unit is not stuck: UnitID = " .. unitID, "distance moved:", distanceMoved)
+    scvlog("Unit is not stuck: UnitID = " .. unitID)
   end
 
   return stuck
@@ -1781,30 +2005,10 @@ function handleStuckUnits(unitID, unitDef)
           local unitData = unitsToCollect[unitID]
           if unitData and unitData.taskStatus == "in_progress" then
               local featureID = unitData.featureID
-              
-              -- If we don't have featureID stored, try to find it from nearby features
-              if not featureID then
-                  local ux, uy, uz = Spring.GetUnitPosition(unitID)
-                  if ux and uz then
-                      -- Look for features within a small radius that this unit might be trying to reach
-                      local nearbyFeatures = Spring.GetFeaturesInCylinder(ux, uz, 100)
-                      for _, nearbyFeatureID in ipairs(nearbyFeatures) do
-                          -- Check if this feature is targeted and has resources/is resurrectable
-                          if targetedFeatures[nearbyFeatureID] then
-                              local featureDefID = spGetFeatureDefID(nearbyFeatureID)
-                              if featureDefID then
-                                  local fDef = FeatureDefs[featureDefID]
-                                  if fDef and (fDef.reclaimable or fDef.resurrectable) then
-                                      featureID = nearbyFeatureID
-                                      scvlog("Found likely stuck target: featureID", featureID)
-                                      break
-                                  end
-                              end
-                          end
-                      end
-                  end
-              end
 
+              -- Or if you track the feature differently (resurrect vs. reclaim),
+              -- you may also look in resurrectingUnits or targetedFeatures.
+              
               if featureID then
                 unreachableFeatures[featureID] = Spring.GetGameFrame()  -- store the frame we decided it's unreachable
                 scvlog("Marking featureID", featureID, "as unreachable at frame", unreachableFeatures[featureID])
@@ -1816,8 +2020,6 @@ function handleStuckUnits(unitID, unitDef)
                           targetedFeatures[featureID] = nil
                       end
                   end
-              else
-                  scvlog("Could not identify stuck target for unit", unitID)
               end
           end
 
