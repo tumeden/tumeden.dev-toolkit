@@ -198,11 +198,7 @@ local checkboxes = {
     excludeCommanders = { state = true, label = "Exclude Commanders from Collection" } -- New toggle, default enabled
 }
 
-local sliders = {
-    healResurrectRadius = { value = healResurrectRadius, min = 0, max = 2000, label = "Heal/Resurrect Radius" },
-    reclaimRadius = { value = reclaimRadius, min = 0, max = 5000, label = "Resource Collection Radius" },
-    enemyAvoidanceRadius = { value = enemyAvoidanceRadius, min = 0, max = 2000, label = "Maintain Safe Distance" }
-}
+local sliders = {}
 
 -- Helper function to draw circular knob
 local function drawCircle(x, y, radius, color)
@@ -233,10 +229,10 @@ function widget:Initialize()
     uiPosX = Spring.GetConfigFloat("scv_uiPosX", uiPosX)
     uiPosY = Spring.GetConfigFloat("scv_uiPosY", uiPosY)
     
-    -- Update slider values
-    sliders.healResurrectRadius.value = healResurrectRadius
-    sliders.reclaimRadius.value = reclaimRadius
-    sliders.enemyAvoidanceRadius.value = enemyAvoidanceRadius
+    -- Initialize sliders with loaded values
+    sliders.healResurrectRadius = { value = healResurrectRadius, min = 0, max = 2000, label = "Heal/Resurrect Radius" }
+    sliders.reclaimRadius = { value = reclaimRadius, min = 0, max = 5000, label = "Resource Collection Radius" }
+    sliders.enemyAvoidanceRadius = { value = enemyAvoidanceRadius, min = 0, max = 2000, label = "Maintain Safe Distance" }
     
     -- Load checkbox states
     for k, v in pairs(checkboxes) do
