@@ -6,7 +6,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.28",
+    version   = "v1.27",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -117,11 +117,11 @@ end
 local showUI = false
 local UI = {
     width = 340,
-    height = 640,
+    height = 540,
     backgroundColor = {0.1, 0.1, 0.1, 0.9},
     textColor = {1, 1, 1, 1},
     sectionHeaderColor = {0.8, 0.9, 1, 1},
-    sectionBgColor = {0.15, 0.15, 0.18, 0.62}, -- middleground opacity
+    sectionBgColor = {0.15, 0.15, 0.18, 0.7},
     checkboxColor = {0.3, 0.7, 0.3, 0.9},
     sliderColor = {0.3, 0.7, 0.3, 0.9},
     sliderKnobColor = {0.4, 0.8, 0.4, 1.0},
@@ -129,8 +129,7 @@ local UI = {
     padding = 24,
     spacing = 35,
     sectionSpacing = 44,
-    sectionHeaderSize = 16,
-    sectionGap = 8 -- new: vertical gap between sections
+    sectionHeaderSize = 16
 }
 
 -- Movable UI state
@@ -143,16 +142,12 @@ local dragOffsetX, dragOffsetY = 0, 0
 local activeDragSlider = nil
 local activeDragName = nil
 
--- Commander names table (dynamically built in widget:Initialize)
-local commanderNames = {}
-
 local checkboxes = {
     excludeBuildings = { state = false, label = "Exclude buildings from Resurrection" },
     healing = { state = false, label = "Healing" },
     collecting = { state = false, label = "Resource Collection" },
     resurrecting = { state = false, label = "Resurrect" },
-    healCloaked = { state = false, label = "Heal Cloaked Units" },
-    excludeCommanders = { state = true, label = "Exclude Commanders from Collection" } -- New toggle, default enabled
+    healCloaked = { state = false, label = "Heal Cloaked Units" } -- New toggle, now defaults to false
 }
 
 local sliders = {
@@ -210,14 +205,6 @@ function widget:Initialize()
             widgetHandler:RemoveWidget()
             return
         end
-        -- Dynamically build commanderNames table
-        commanderNames.armcom = true
-        commanderNames.corcom = true
-        if legRezbotDefID then
-            commanderNames.legcom = true
-        else
-            commanderNames.legcom = nil
-        end
     else
         Spring.Echo("UnitDefNames table not found")
         widgetHandler:RemoveWidget()
@@ -225,163 +212,175 @@ function widget:Initialize()
     end
 end
 
-local uiHitboxes = {}
-
 function widget:DrawScreen()
     if not showUI then return end
-    uiHitboxes = {} -- reset hitboxes each frame
+    
     local vsx, vsy = Spring.GetViewGeometry()
-    -- Section layout constants
-    local sectionPad = 4 -- reduced top padding above header
-    local sectionGap = UI.sectionGap
-    local headerH = 26 -- slimmer header background
-    local boxH = 16
-    local sliderH = 26
-    local spacing = UI.spacing
-    local sectionW = UI.width - 32
-    -- Section definitions
-    local sections = {
-        {
-            name = "Healing",
-            mainToggle = "healing",
-            options = {"healCloaked"},
-            slider = sliders.healResurrectRadius,
-        },
-        {
-            name = "Resurrection",
-            mainToggle = "resurrecting",
-            options = {"excludeBuildings"},
-            slider = nil,
-        },
-        {
-            name = "Resource Collection",
-            mainToggle = "collecting",
-            options = {"excludeCommanders"},
-            slider = sliders.reclaimRadius,
-        },
-        {
-            name = "Safety",
-            mainToggle = nil,
-            options = {},
-            slider = sliders.enemyAvoidanceRadius,
-        },
-    }
-    -- Calculate section heights dynamically
-    local sectionHeights = {}
-    for i, sec in ipairs(sections) do
-        local optCount = #sec.options
-        local hasSlider = sec.slider ~= nil
-        local optionPad = 0
-        if optCount > 0 then
-            optionPad = 18
-        elseif hasSlider then
-            optionPad = 32
-        else
-            optionPad = 18
-        end
-        local sliderHgt = hasSlider and sliderH or 0
-        sectionHeights[i] = headerH + sectionPad + optionPad + (optCount * spacing) + sliderHgt + sectionPad
-        sections[i].optionPad = optionPad -- store for use in drawing
-    end
-    -- Calculate total height
-    local totalHeight = 30 -- title bar
-    for i, h in ipairs(sectionHeights) do
-        totalHeight = totalHeight + h
-        if i < #sectionHeights then totalHeight = totalHeight + sectionGap end
-    end
-    UI.height = totalHeight
     local x = math.floor(uiPosX * vsx - UI.width / 2)
     local y = math.floor(uiPosY * vsy + UI.height / 2)
-    -- Draw main background
+    
+    -- Draw background
     gl.Color(UI.backgroundColor[1], UI.backgroundColor[2], UI.backgroundColor[3], UI.backgroundColor[4])
     gl.Rect(x, y - UI.height, x + UI.width, y)
+    
     -- Draw title bar
     gl.Color(0.18, 0.18, 0.18, 1)
     gl.Rect(x, y - 30, x + UI.width, y)
     gl.Color(1, 1, 1, 1)
     gl.Text("RezBot Settings (" .. widgetVersion .. ")", x + UI.width/2 - 90, y - 30 + 8, 14, "o")
-    -- Draw sections
-    local cy = y - 30
+    
+    local cy = y - 60
+    local sectionPad = 16
+    local sectionGap = 16
+    local headerH = UI.sectionHeaderSize + 8
+    local boxH = 16
+    local sliderH = 26
+    local spacing = UI.spacing
+    local sectionW = UI.width - 32
     local sectionX = x + (UI.width - sectionW) / 2
-    local borderColor = {0.4, 0.6, 0.9, 0.45}
-    for i, sec in ipairs(sections) do
-        local secH = sectionHeights[i]
-        local secTop = cy
-        local secBot = cy - secH
-        -- Section background
-        gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], UI.sectionBgColor[4])
-        gl.Rect(sectionX, secBot, sectionX + sectionW, secTop)
-        -- Border
-        gl.Color(borderColor[1], borderColor[2], borderColor[3], borderColor[4])
-        gl.LineWidth(1.5)
-        gl.Rect(sectionX + 0.5, secBot + 0.5, sectionX + sectionW - 0.5, secTop - 0.5)
-        gl.LineWidth(1)
-        -- Header background
-        local headerTop = secTop - sectionPad
-        local headerBot = headerTop - headerH
-        gl.Color(0.18, 0.22, 0.32, 0.82)
-        gl.Rect(sectionX, headerBot, sectionX + sectionW, headerTop)
-        -- Header text and main toggle (checkbox)
-        local headerCenterY = (headerTop + headerBot) / 2
-        local headerX = x + UI.width/2 -- center header text
-        local checkX = x + UI.padding
-        local checkY = headerCenterY - boxH/2
-        if sec.mainToggle then
-            gl.Color(0.2, 0.2, 0.2, 0.8)
-            gl.Rect(checkX, checkY, checkX + boxH, checkY + boxH)
-            if checkboxes[sec.mainToggle].state then
-                gl.Color(0.3, 0.7, 0.3, 0.9)
-                gl.Rect(checkX + 2, checkY + 2, checkX + boxH - 2, checkY + boxH - 2)
-            end
-            -- Store hitbox for main toggle
-            table.insert(uiHitboxes, {type="checkbox", name=sec.mainToggle, x1=checkX, y1=checkY, x2=checkX+boxH, y2=checkY+boxH})
-        end
-        gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
-        -- Center header text
-        local headerText = sec.name
-        local headerTextWidth = gl.GetTextWidth(headerText) * UI.sectionHeaderSize
-        gl.Text(headerText, headerX - headerTextWidth/2, headerCenterY - UI.sectionHeaderSize/2 + 2, UI.sectionHeaderSize, "o")
-        -- Section content
-        local contentY = headerBot - sec.optionPad
-        for _, name in ipairs(sec.options) do
-            local box = checkboxes[name]
-            local cx = x + UI.padding
-            gl.Color(0.2, 0.2, 0.2, 0.8)
-            gl.Rect(cx, contentY, cx + boxH, contentY + boxH)
-            if box.state then
-                gl.Color(0.3, 0.7, 0.3, 0.9)
-                gl.Rect(cx + 2, contentY + 2, cx + boxH - 2, contentY + boxH - 2)
-            end
-            gl.Color(1, 1, 1, 1)
-            gl.Text(box.label, cx + 24, contentY + 2, 12)
-            -- Store hitbox for option checkbox
-            table.insert(uiHitboxes, {type="checkbox", name=name, x1=cx, y1=contentY, x2=cx+boxH, y2=contentY+boxH})
-            contentY = contentY - spacing
-        end
-        if sec.slider then
-            local slider = sec.slider
-            local sliderX = x + UI.padding
-            gl.Color(1, 1, 1, 1)
-            gl.Text(slider.label, sliderX, contentY + 20, 12)
-            gl.Color(0.2, 0.2, 0.2, 0.8)
-            gl.Rect(sliderX, contentY, sliderX + 200, contentY + 6)
-            local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+    -- Section: Healing
+    local healingControls = {"healing", "healCloaked"}
+    local healingSlider = true
+    local healingSectionHeight = headerH + #healingControls * spacing + (healingSlider and sliderH or 0) + sectionPad * 2
+    local healingTop = cy + sectionPad
+    local healingBot = cy - healingSectionHeight + sectionPad
+    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
+    gl.Rect(sectionX, healingBot, sectionX + sectionW, healingTop)
+    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
+    gl.Text("Healing", x + UI.width/2 - 40, cy - 2, UI.sectionHeaderSize, "o")
+    cy = cy - headerH
+    for _, name in ipairs(healingControls) do
+        local box = checkboxes[name]
+        local cx = x + UI.padding
+        gl.Color(0.2, 0.2, 0.2, 0.8)
+        gl.Rect(cx, cy, cx + boxH, cy + boxH)
+        if box.state then
             gl.Color(0.3, 0.7, 0.3, 0.9)
-            gl.Rect(sliderX, contentY, sliderX + fillWidth, contentY + 6)
-            local knobX = sliderX + fillWidth
-            local knobY = contentY + 3
-            drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
-            drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
-            drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
-            gl.Color(1, 1, 1, 1)
-            gl.Text(string.format("%.0f", slider.value), sliderX + 210, contentY - 2, 12)
-            -- Store hitbox for slider knob and bar
-            local knobHitSize = UI.sliderKnobSize + 4
-            table.insert(uiHitboxes, {type="slider", name=slider.label, slider=slider, x1=sliderX, y1=contentY-4, x2=sliderX+200, y2=contentY+10, knobX=knobX, knobY=knobY, knobR=knobHitSize})
-            contentY = contentY - sliderH
+            gl.Rect(cx + 2, cy + 2, cx + boxH - 2, cy + boxH - 2)
         end
-        cy = secBot - sectionGap
+        gl.Color(1, 1, 1, 1)
+        gl.Text(box.label, cx + 24, cy + 2, 12)
+        cy = cy - spacing
     end
+    -- Healing slider
+    local slider = sliders.healResurrectRadius
+    local sliderX = x + UI.padding
+    gl.Color(1, 1, 1, 1)
+    gl.Text(slider.label, sliderX, cy + 20, 12)
+    gl.Color(0.2, 0.2, 0.2, 0.8)
+    gl.Rect(sliderX, cy, sliderX + 200, cy + 6)
+    local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+    gl.Color(0.3, 0.7, 0.3, 0.9)
+    gl.Rect(sliderX, cy, sliderX + fillWidth, cy + 6)
+    local knobX = sliderX + fillWidth
+    local knobY = cy + 3
+    drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
+    drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
+    drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
+    gl.Color(1, 1, 1, 1)
+    gl.Text(string.format("%.0f", slider.value), sliderX + 210, cy - 2, 12)
+    cy = cy - sliderH
+    cy = cy - sectionPad
+    cy = cy - sectionGap
+    -- Section: Resurrection
+    local resurrectionControls = {"resurrecting", "excludeBuildings"}
+    local resurrectionSlider = false
+    local resurrectionSectionHeight = headerH + #resurrectionControls * spacing + (resurrectionSlider and sliderH or 0) + sectionPad * 2
+    local resurrectionTop = cy + sectionPad
+    local resurrectionBot = cy - resurrectionSectionHeight + sectionPad
+    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
+    gl.Rect(sectionX, resurrectionBot, sectionX + sectionW, resurrectionTop)
+    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
+    gl.Text("Resurrection", x + UI.width/2 - 60, cy - 2, UI.sectionHeaderSize, "o")
+    cy = cy - headerH
+    for _, name in ipairs(resurrectionControls) do
+        local box = checkboxes[name]
+        local cx = x + UI.padding
+        gl.Color(0.2, 0.2, 0.2, 0.8)
+        gl.Rect(cx, cy, cx + boxH, cy + boxH)
+        if box.state then
+            gl.Color(0.3, 0.7, 0.3, 0.9)
+            gl.Rect(cx + 2, cy + 2, cx + boxH - 2, cy + boxH - 2)
+        end
+        gl.Color(1, 1, 1, 1)
+        gl.Text(box.label, cx + 24, cy + 2, 12)
+        cy = cy - spacing
+    end
+    cy = cy - sectionPad
+    cy = cy - sectionGap
+    -- Section: Resource Collection
+    local resourceControls = {"collecting"}
+    local resourceSlider = true
+    local resourceSectionHeight = headerH + #resourceControls * spacing + (resourceSlider and sliderH or 0) + sectionPad * 2
+    local resourceTop = cy + sectionPad
+    local resourceBot = cy - resourceSectionHeight + sectionPad
+    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
+    gl.Rect(sectionX, resourceBot, sectionX + sectionW, resourceTop)
+    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
+    gl.Text("Resource Collection", x + UI.width/2 - 90, cy - 2, UI.sectionHeaderSize, "o")
+    cy = cy - headerH
+    for _, name in ipairs(resourceControls) do
+        local box = checkboxes[name]
+        local cx = x + UI.padding
+        gl.Color(0.2, 0.2, 0.2, 0.8)
+        gl.Rect(cx, cy, cx + boxH, cy + boxH)
+        if box.state then
+            gl.Color(0.3, 0.7, 0.3, 0.9)
+            gl.Rect(cx + 2, cy + 2, cx + boxH - 2, cy + boxH - 2)
+        end
+        gl.Color(1, 1, 1, 1)
+        gl.Text(box.label, cx + 24, cy + 2, 12)
+        cy = cy - spacing
+    end
+    -- Resource Collection slider
+    slider = sliders.reclaimRadius
+    sliderX = x + UI.padding
+    gl.Color(1, 1, 1, 1)
+    gl.Text(slider.label, sliderX, cy + 20, 12)
+    gl.Color(0.2, 0.2, 0.2, 0.8)
+    gl.Rect(sliderX, cy, sliderX + 200, cy + 6)
+    fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+    gl.Color(0.3, 0.7, 0.3, 0.9)
+    gl.Rect(sliderX, cy, sliderX + fillWidth, cy + 6)
+    knobX = sliderX + fillWidth
+    knobY = cy + 3
+    drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
+    drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
+    drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
+    gl.Color(1, 1, 1, 1)
+    gl.Text(string.format("%.0f", slider.value), sliderX + 210, cy - 2, 12)
+    cy = cy - sliderH
+    cy = cy - sectionPad
+    cy = cy - sectionGap
+    -- Section: Safety
+    local safetyControls = {}
+    local safetySlider = true
+    local safetySectionHeight = headerH + #safetyControls * spacing + (safetySlider and sliderH or 0) + sectionPad * 2
+    local safetyTop = cy + sectionPad
+    local safetyBot = cy - safetySectionHeight + sectionPad
+    gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], 0.55)
+    gl.Rect(sectionX, safetyBot, sectionX + sectionW, safetyTop)
+    gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
+    gl.Text("Safety", x + UI.width/2 - 30, cy - 2, UI.sectionHeaderSize, "o")
+    cy = cy - headerH
+    cy = cy - sectionPad
+    -- Safety slider
+    slider = sliders.enemyAvoidanceRadius
+    sliderX = x + UI.padding
+    gl.Color(1, 1, 1, 1)
+    gl.Text(slider.label, sliderX, cy + 20, 12)
+    gl.Color(0.2, 0.2, 0.2, 0.8)
+    gl.Rect(sliderX, cy, sliderX + 200, cy + 6)
+    fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
+    gl.Color(0.3, 0.7, 0.3, 0.9)
+    gl.Rect(sliderX, cy, sliderX + fillWidth, cy + 6)
+    knobX = sliderX + fillWidth
+    knobY = cy + 3
+    drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
+    drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
+    drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
+    gl.Color(1, 1, 1, 1)
+    gl.Text(string.format("%.0f", slider.value), sliderX + 210, cy - 2, 12)
 end
 
 function widget:MousePress(mx, my, button)
@@ -396,416 +395,110 @@ function widget:MousePress(mx, my, button)
         dragOffsetY = my - y
         return true
     end
-    -- Use dynamic hitboxes
-    for _, hit in ipairs(uiHitboxes) do
-        if hit.type == "checkbox" then
-            if mx >= hit.x1 and mx <= hit.x2 and my >= hit.y1 and my <= hit.y2 then
-                checkboxes[hit.name].state = not checkboxes[hit.name].state
-                Spring.SetConfigInt("scv_checkbox_"..hit.name, checkboxes[hit.name].state and 1 or 0)
-                return true
-            end
-        elseif hit.type == "slider" then
-            -- Check knob first
-            if (mx - hit.knobX)^2 + (my - hit.knobY)^2 <= (hit.knobR)^2 or
-               (mx >= hit.x1 and mx <= hit.x2 and my >= hit.y1 and my <= hit.y2) then
-                activeDragSlider = hit.slider
-                activeDragName = hit.name
-                local ratio = (mx - hit.x1) / 200
-                ratio = math.max(0, math.min(1, ratio))
-                hit.slider.value = mathFloor(hit.slider.min + (hit.slider.max - hit.slider.min) * ratio)
-                if hit.slider == sliders.healResurrectRadius then
-                    healResurrectRadius = hit.slider.value
-                    Spring.SetConfigInt("scv_healResurrectRadius", hit.slider.value)
-                elseif hit.slider == sliders.reclaimRadius then
-                    reclaimRadius = hit.slider.value
-                    Spring.SetConfigInt("scv_reclaimRadius", hit.slider.value)
-                elseif hit.slider == sliders.enemyAvoidanceRadius then
-                    enemyAvoidanceRadius = hit.slider.value
-                    Spring.SetConfigInt("scv_enemyAvoidanceRadius", hit.slider.value)
-                end
-                return true
-            end
+    -- Check for checkbox clicks
+    local cy = y - 60
+    local sectionPad = 16
+    local sectionGap = 16
+    local headerH = UI.sectionHeaderSize + 8
+    local boxH = 16
+    local sliderH = 26
+    local spacing = UI.spacing
+    -- Healing section
+    cy = cy - headerH
+    for _, name in ipairs({"healing", "healCloaked"}) do
+        if mx >= x + UI.padding and mx <= x + UI.padding + boxH and
+           my >= cy and my <= cy + boxH then
+            checkboxes[name].state = not checkboxes[name].state
+            Spring.SetConfigInt("scv_checkbox_"..name, checkboxes[name].state and 1 or 0)
+            return true
         end
+        cy = cy - spacing
     end
-    return false
-end
-
-function widget:MouseRelease(mx, my, button)
-    if isDraggingUI then
-        isDraggingUI = false
-        -- Save position
-        Spring.SetConfigFloat("scv_uiPosX", uiPosX)
-        Spring.SetConfigFloat("scv_uiPosY", uiPosY)
-        return true
-    end
-    if activeDragSlider then
-        activeDragSlider = nil
-        activeDragName = nil
-        return true
-    end
-    return false
-end
-
-function widget:MouseMove(mx, my, dx, dy, button)
-    if not showUI then return end
-    local vsx, vsy = Spring.GetViewGeometry()
-    if isDraggingUI then
-        uiPosX = math.max(0, math.min(1, (mx - dragOffsetX + UI.width / 2) / vsx))
-        uiPosY = math.max(0, math.min(1, (my - dragOffsetY - UI.height / 2) / vsy))
-    end
-    -- Only process if we're dragging a slider
-    if activeDragSlider then
-        local x = math.floor(uiPosX * vsx - UI.width / 2)
-        local ratio = (mx - (x + UI.padding)) / 200
+    -- Healing slider
+    local healingSliderY = cy
+    local healingSliderX = x + UI.padding
+    local fillWidth = 200 * (sliders.healResurrectRadius.value - sliders.healResurrectRadius.min) / (sliders.healResurrectRadius.max - sliders.healResurrectRadius.min)
+    local knobX = healingSliderX + fillWidth
+    local knobY = healingSliderY + 3
+    local knobHitSize = UI.sliderKnobSize + 4
+    if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
+       (mx >= healingSliderX and mx <= healingSliderX + 200 and
+        my >= healingSliderY - 4 and my <= healingSliderY + 10) then
+        activeDragSlider = sliders.healResurrectRadius
+        activeDragName = "healResurrectRadius"
+        local ratio = (mx - healingSliderX) / 200
         ratio = math.max(0, math.min(1, ratio))
-        activeDragSlider.value = mathFloor(activeDragSlider.min + (activeDragSlider.max - activeDragSlider.min) * ratio)
-        if activeDragName == "healResurrectRadius" then 
-            healResurrectRadius = activeDragSlider.value
-            Spring.SetConfigInt("scv_healResurrectRadius", activeDragSlider.value)
-        elseif activeDragName == "reclaimRadius" then 
-            reclaimRadius = activeDragSlider.value
-            Spring.SetConfigInt("scv_reclaimRadius", activeDragSlider.value)
-        elseif activeDragName == "enemyAvoidanceRadius" then 
-            enemyAvoidanceRadius = activeDragSlider.value
-            Spring.SetConfigInt("scv_enemyAvoidanceRadius", activeDragSlider.value)
-        end
-    end
-end
-
-function widget:KeyPress(key, mods, isRepeat)
-    if key == 0x0076 and mods.alt then  -- Alt+V to toggle UI
-        showUI = not showUI
-        return true
-    elseif key == 27 then  -- Escape to close UI
-        showUI = false
+        sliders.healResurrectRadius.value = mathFloor(sliders.healResurrectRadius.min + (sliders.healResurrectRadius.max - sliders.healResurrectRadius.min) * ratio)
+        healResurrectRadius = sliders.healResurrectRadius.value
+        Spring.SetConfigInt("scv_healResurrectRadius", sliders.healResurrectRadius.value)
         return true
     end
-    return false
-end
-
-
-
--- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
--- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
--- ////////////////////////////////////////- UI CODE -////////////////////////////////////// -- /////////////////////////////////////////// -- 
--- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
--- /////////////////////////////////////////// -- /////////////////////////////////////////// -- /////////////////////////////////////////// -- 
-
-
-
--- UI Variables and Constants
-local showUI = false
-local UI = {
-    width = 340,
-    height = 640,
-    backgroundColor = {0.1, 0.1, 0.1, 0.9},
-    textColor = {1, 1, 1, 1},
-    sectionHeaderColor = {0.8, 0.9, 1, 1},
-    sectionBgColor = {0.15, 0.15, 0.18, 0.62}, -- middleground opacity
-    checkboxColor = {0.3, 0.7, 0.3, 0.9},
-    sliderColor = {0.3, 0.7, 0.3, 0.9},
-    sliderKnobColor = {0.4, 0.8, 0.4, 1.0},
-    sliderKnobSize = 12,
-    padding = 24,
-    spacing = 35,
-    sectionSpacing = 44,
-    sectionHeaderSize = 16,
-    sectionGap = 8 -- new: vertical gap between sections
-}
-
--- Movable UI state
-local uiPosX = 0.5 -- normalized (0 = left, 1 = right)
-local uiPosY = 0.7 -- normalized (0 = bottom, 1 = top)
-local isDraggingUI = false
-local dragOffsetX, dragOffsetY = 0, 0
-
--- Track which slider is being dragged
-local activeDragSlider = nil
-local activeDragName = nil
-
--- Commander names table (dynamically built in widget:Initialize)
-local commanderNames = {}
-
-local checkboxes = {
-    excludeBuildings = { state = false, label = "Exclude buildings from Resurrection" },
-    healing = { state = false, label = "Healing" },
-    collecting = { state = false, label = "Resource Collection" },
-    resurrecting = { state = false, label = "Resurrect" },
-    healCloaked = { state = false, label = "Heal Cloaked Units" },
-    excludeCommanders = { state = true, label = "Exclude Commanders from Collection" } -- New toggle, default enabled
-}
-
-local sliders = {
-    healResurrectRadius = { value = healResurrectRadius, min = 0, max = 2000, label = "Heal/Resurrect Radius" },
-    reclaimRadius = { value = reclaimRadius, min = 0, max = 5000, label = "Resource Collection Radius" },
-    enemyAvoidanceRadius = { value = enemyAvoidanceRadius, min = 0, max = 2000, label = "Maintain Safe Distance" }
-}
-
--- Helper function to draw circular knob
-local function drawCircle(x, y, radius, color)
-    gl.Color(unpack(color))
-    gl.BeginEnd(GL.TRIANGLE_FAN, function()
-        gl.Vertex(x, y)
-        for i = 0, 30 do
-            local angle = (i / 30) * 2 * math.pi
-            gl.Vertex(x + math.cos(angle) * radius, 
-                     y + math.sin(angle) * radius)
+    cy = cy - sliderH
+    cy = cy - sectionPad
+    cy = cy - sectionGap
+    -- Resurrection section
+    cy = cy - headerH
+    for _, name in ipairs({"resurrecting", "excludeBuildings"}) do
+        if mx >= x + UI.padding and mx <= x + UI.padding + boxH and
+           my >= cy and my <= cy + boxH then
+            checkboxes[name].state = not checkboxes[name].state
+            Spring.SetConfigInt("scv_checkbox_"..name, checkboxes[name].state and 1 or 0)
+            return true
         end
-    end)
-end
-
-function widget:Initialize()
-    if Spring.GetSpectatingState() then
-        Spring.Echo("You are a spectator. Widget is disabled.")
-        widgetHandler:RemoveWidget(self)
-        return
+        cy = cy - spacing
     end
-
-    -- Load persistent UI state
-    healResurrectRadius = Spring.GetConfigInt("scv_healResurrectRadius", healResurrectRadius)
-    reclaimRadius = Spring.GetConfigInt("scv_reclaimRadius", reclaimRadius)
-    enemyAvoidanceRadius = Spring.GetConfigInt("scv_enemyAvoidanceRadius", enemyAvoidanceRadius)
-    
-    -- Load UI position (normalized)
-    uiPosX = Spring.GetConfigFloat("scv_uiPosX", uiPosX)
-    uiPosY = Spring.GetConfigFloat("scv_uiPosY", uiPosY)
-    
-    -- Update slider values
-    sliders.healResurrectRadius.value = healResurrectRadius
-    sliders.reclaimRadius.value = reclaimRadius
-    sliders.enemyAvoidanceRadius.value = enemyAvoidanceRadius
-    
-    -- Load checkbox states
-    for k, v in pairs(checkboxes) do
-        v.state = Spring.GetConfigInt("scv_checkbox_"..k, v.state and 1 or 0) == 1
-    end
-
-    if UnitDefNames then
-        if UnitDefNames.armrectr then armRectrDefID = UnitDefNames.armrectr.id end
-        if UnitDefNames.cornecro then corNecroDefID = UnitDefNames.cornecro.id end
-        if UnitDefNames.legrezbot then legRezbotDefID = UnitDefNames.legrezbot.id end
-
-        if not (armRectrDefID or corNecroDefID or legRezbotDefID) then
-            Spring.Echo("No supported RezBot UnitDefIDs could be determined")
-            widgetHandler:RemoveWidget()
-            return
-        end
-        -- Dynamically build commanderNames table
-        commanderNames.armcom = true
-        commanderNames.corcom = true
-        if legRezbotDefID then
-            commanderNames.legcom = true
-        else
-            commanderNames.legcom = nil
-        end
-    else
-        Spring.Echo("UnitDefNames table not found")
-        widgetHandler:RemoveWidget()
-        return
-    end
-end
-
-local uiHitboxes = {}
-
-function widget:DrawScreen()
-    if not showUI then return end
-    uiHitboxes = {} -- reset hitboxes each frame
-    local vsx, vsy = Spring.GetViewGeometry()
-    -- Section layout constants
-    local sectionPad = 4 -- reduced top padding above header
-    local sectionGap = UI.sectionGap
-    local headerH = 26 -- slimmer header background
-    local boxH = 16
-    local sliderH = 26
-    local spacing = UI.spacing
-    local sectionW = UI.width - 32
-    -- Section definitions
-    local sections = {
-        {
-            name = "Healing",
-            mainToggle = "healing",
-            options = {"healCloaked"},
-            slider = sliders.healResurrectRadius,
-        },
-        {
-            name = "Resurrection",
-            mainToggle = "resurrecting",
-            options = {"excludeBuildings"},
-            slider = nil,
-        },
-        {
-            name = "Resource Collection",
-            mainToggle = "collecting",
-            options = {"excludeCommanders"},
-            slider = sliders.reclaimRadius,
-        },
-        {
-            name = "Safety",
-            mainToggle = nil,
-            options = {},
-            slider = sliders.enemyAvoidanceRadius,
-        },
-    }
-    -- Calculate section heights dynamically
-    local sectionHeights = {}
-    for i, sec in ipairs(sections) do
-        local optCount = #sec.options
-        local hasSlider = sec.slider ~= nil
-        local optionPad = 0
-        if optCount > 0 then
-            optionPad = 18
-        elseif hasSlider then
-            optionPad = 32
-        else
-            optionPad = 18
-        end
-        local sliderHgt = hasSlider and sliderH or 0
-        sectionHeights[i] = headerH + sectionPad + optionPad + (optCount * spacing) + sliderHgt + sectionPad
-        sections[i].optionPad = optionPad -- store for use in drawing
-    end
-    -- Calculate total height
-    local totalHeight = 30 -- title bar
-    for i, h in ipairs(sectionHeights) do
-        totalHeight = totalHeight + h
-        if i < #sectionHeights then totalHeight = totalHeight + sectionGap end
-    end
-    UI.height = totalHeight
-    local x = math.floor(uiPosX * vsx - UI.width / 2)
-    local y = math.floor(uiPosY * vsy + UI.height / 2)
-    -- Draw main background
-    gl.Color(UI.backgroundColor[1], UI.backgroundColor[2], UI.backgroundColor[3], UI.backgroundColor[4])
-    gl.Rect(x, y - UI.height, x + UI.width, y)
-    -- Draw title bar
-    gl.Color(0.18, 0.18, 0.18, 1)
-    gl.Rect(x, y - 30, x + UI.width, y)
-    gl.Color(1, 1, 1, 1)
-    gl.Text("RezBot Settings (" .. widgetVersion .. ")", x + UI.width/2 - 90, y - 30 + 8, 14, "o")
-    -- Draw sections
-    local cy = y - 30
-    local sectionX = x + (UI.width - sectionW) / 2
-    local borderColor = {0.4, 0.6, 0.9, 0.45}
-    for i, sec in ipairs(sections) do
-        local secH = sectionHeights[i]
-        local secTop = cy
-        local secBot = cy - secH
-        -- Section background
-        gl.Color(UI.sectionBgColor[1], UI.sectionBgColor[2], UI.sectionBgColor[3], UI.sectionBgColor[4])
-        gl.Rect(sectionX, secBot, sectionX + sectionW, secTop)
-        -- Border
-        gl.Color(borderColor[1], borderColor[2], borderColor[3], borderColor[4])
-        gl.LineWidth(1.5)
-        gl.Rect(sectionX + 0.5, secBot + 0.5, sectionX + sectionW - 0.5, secTop - 0.5)
-        gl.LineWidth(1)
-        -- Header background
-        local headerTop = secTop - sectionPad
-        local headerBot = headerTop - headerH
-        gl.Color(0.18, 0.22, 0.32, 0.82)
-        gl.Rect(sectionX, headerBot, sectionX + sectionW, headerTop)
-        -- Header text and main toggle (checkbox)
-        local headerCenterY = (headerTop + headerBot) / 2
-        local headerX = x + UI.width/2 -- center header text
-        local checkX = x + UI.padding
-        local checkY = headerCenterY - boxH/2
-        if sec.mainToggle then
-            gl.Color(0.2, 0.2, 0.2, 0.8)
-            gl.Rect(checkX, checkY, checkX + boxH, checkY + boxH)
-            if checkboxes[sec.mainToggle].state then
-                gl.Color(0.3, 0.7, 0.3, 0.9)
-                gl.Rect(checkX + 2, checkY + 2, checkX + boxH - 2, checkY + boxH - 2)
-            end
-            -- Store hitbox for main toggle
-            table.insert(uiHitboxes, {type="checkbox", name=sec.mainToggle, x1=checkX, y1=checkY, x2=checkX+boxH, y2=checkY+boxH})
-        end
-        gl.Color(UI.sectionHeaderColor[1], UI.sectionHeaderColor[2], UI.sectionHeaderColor[3], UI.sectionHeaderColor[4])
-        -- Center header text
-        local headerText = sec.name
-        local headerTextWidth = gl.GetTextWidth(headerText) * UI.sectionHeaderSize
-        gl.Text(headerText, headerX - headerTextWidth/2, headerCenterY - UI.sectionHeaderSize/2 + 2, UI.sectionHeaderSize, "o")
-        -- Section content
-        local contentY = headerBot - sec.optionPad
-        for _, name in ipairs(sec.options) do
-            local box = checkboxes[name]
-            local cx = x + UI.padding
-            gl.Color(0.2, 0.2, 0.2, 0.8)
-            gl.Rect(cx, contentY, cx + boxH, contentY + boxH)
-            if box.state then
-                gl.Color(0.3, 0.7, 0.3, 0.9)
-                gl.Rect(cx + 2, contentY + 2, cx + boxH - 2, contentY + boxH - 2)
-            end
-            gl.Color(1, 1, 1, 1)
-            gl.Text(box.label, cx + 24, contentY + 2, 12)
-            -- Store hitbox for option checkbox
-            table.insert(uiHitboxes, {type="checkbox", name=name, x1=cx, y1=contentY, x2=cx+boxH, y2=contentY+boxH})
-            contentY = contentY - spacing
-        end
-        if sec.slider then
-            local slider = sec.slider
-            local sliderX = x + UI.padding
-            gl.Color(1, 1, 1, 1)
-            gl.Text(slider.label, sliderX, contentY + 20, 12)
-            gl.Color(0.2, 0.2, 0.2, 0.8)
-            gl.Rect(sliderX, contentY, sliderX + 200, contentY + 6)
-            local fillWidth = 200 * (slider.value - slider.min) / (slider.max - slider.min)
-            gl.Color(0.3, 0.7, 0.3, 0.9)
-            gl.Rect(sliderX, contentY, sliderX + fillWidth, contentY + 6)
-            local knobX = sliderX + fillWidth
-            local knobY = contentY + 3
-            drawCircle(knobX + 1, knobY - 1, UI.sliderKnobSize/2 + 1, {0, 0, 0, 0.3})
-            drawCircle(knobX, knobY, UI.sliderKnobSize/2, UI.sliderKnobColor)
-            drawCircle(knobX - 2, knobY - 2, UI.sliderKnobSize/4, {1, 1, 1, 0.3})
-            gl.Color(1, 1, 1, 1)
-            gl.Text(string.format("%.0f", slider.value), sliderX + 210, contentY - 2, 12)
-            -- Store hitbox for slider knob and bar
-            local knobHitSize = UI.sliderKnobSize + 4
-            table.insert(uiHitboxes, {type="slider", name=slider.label, slider=slider, x1=sliderX, y1=contentY-4, x2=sliderX+200, y2=contentY+10, knobX=knobX, knobY=knobY, knobR=knobHitSize})
-            contentY = contentY - sliderH
-        end
-        cy = secBot - sectionGap
-    end
-end
-
-function widget:MousePress(mx, my, button)
-    if not showUI then return false end
-    local vsx, vsy = Spring.GetViewGeometry()
-    local x = math.floor(uiPosX * vsx - UI.width / 2)
-    local y = math.floor(uiPosY * vsy + UI.height / 2)
-    -- Check for title bar drag
-    if mx >= x and mx <= x + UI.width and my >= y - 30 and my <= y then
-        isDraggingUI = true
-        dragOffsetX = mx - x
-        dragOffsetY = my - y
+    cy = cy - sectionPad
+    cy = cy - sectionGap
+    -- Resource Collection section
+    cy = cy - headerH
+    if mx >= x + UI.padding and mx <= x + UI.padding + boxH and
+       my >= cy and my <= cy + boxH then
+        checkboxes.collecting.state = not checkboxes.collecting.state
+        Spring.SetConfigInt("scv_checkbox_collecting", checkboxes.collecting.state and 1 or 0)
         return true
     end
-    -- Use dynamic hitboxes
-    for _, hit in ipairs(uiHitboxes) do
-        if hit.type == "checkbox" then
-            if mx >= hit.x1 and mx <= hit.x2 and my >= hit.y1 and my <= hit.y2 then
-                checkboxes[hit.name].state = not checkboxes[hit.name].state
-                Spring.SetConfigInt("scv_checkbox_"..hit.name, checkboxes[hit.name].state and 1 or 0)
-                return true
-            end
-        elseif hit.type == "slider" then
-            -- Check knob first
-            if (mx - hit.knobX)^2 + (my - hit.knobY)^2 <= (hit.knobR)^2 or
-               (mx >= hit.x1 and mx <= hit.x2 and my >= hit.y1 and my <= hit.y2) then
-                activeDragSlider = hit.slider
-                activeDragName = hit.name
-                local ratio = (mx - hit.x1) / 200
-                ratio = math.max(0, math.min(1, ratio))
-                hit.slider.value = mathFloor(hit.slider.min + (hit.slider.max - hit.slider.min) * ratio)
-                if hit.slider == sliders.healResurrectRadius then
-                    healResurrectRadius = hit.slider.value
-                    Spring.SetConfigInt("scv_healResurrectRadius", hit.slider.value)
-                elseif hit.slider == sliders.reclaimRadius then
-                    reclaimRadius = hit.slider.value
-                    Spring.SetConfigInt("scv_reclaimRadius", hit.slider.value)
-                elseif hit.slider == sliders.enemyAvoidanceRadius then
-                    enemyAvoidanceRadius = hit.slider.value
-                    Spring.SetConfigInt("scv_enemyAvoidanceRadius", hit.slider.value)
-                end
-                return true
-            end
-        end
+    cy = cy - spacing
+    -- Resource Collection slider
+    local resourceSliderY = cy
+    local resourceSliderX = x + UI.padding
+    fillWidth = 200 * (sliders.reclaimRadius.value - sliders.reclaimRadius.min) / (sliders.reclaimRadius.max - sliders.reclaimRadius.min)
+    knobX = resourceSliderX + fillWidth
+    knobY = resourceSliderY + 3
+    if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
+       (mx >= resourceSliderX and mx <= resourceSliderX + 200 and
+        my >= resourceSliderY - 4 and my <= resourceSliderY + 10) then
+        activeDragSlider = sliders.reclaimRadius
+        activeDragName = "reclaimRadius"
+        local ratio = (mx - resourceSliderX) / 200
+        ratio = math.max(0, math.min(1, ratio))
+        sliders.reclaimRadius.value = mathFloor(sliders.reclaimRadius.min + (sliders.reclaimRadius.max - sliders.reclaimRadius.min) * ratio)
+        reclaimRadius = sliders.reclaimRadius.value
+        Spring.SetConfigInt("scv_reclaimRadius", sliders.reclaimRadius.value)
+        return true
+    end
+    cy = cy - sliderH
+    cy = cy - sectionPad
+    cy = cy - sectionGap
+    -- Safety section
+    cy = cy - headerH
+    cy = cy - sectionPad
+    -- Safety slider
+    local safetySliderY = cy
+    local safetySliderX = x + UI.padding
+    fillWidth = 200 * (sliders.enemyAvoidanceRadius.value - sliders.enemyAvoidanceRadius.min) / (sliders.enemyAvoidanceRadius.max - sliders.enemyAvoidanceRadius.min)
+    knobX = safetySliderX + fillWidth
+    knobY = safetySliderY + 3
+    if (mx - knobX)^2 + (my - knobY)^2 <= (knobHitSize)^2 or
+       (mx >= safetySliderX and mx <= safetySliderX + 200 and
+        my >= safetySliderY - 4 and my <= safetySliderY + 10) then
+        activeDragSlider = sliders.enemyAvoidanceRadius
+        activeDragName = "enemyAvoidanceRadius"
+        local ratio = (mx - safetySliderX) / 200
+        ratio = math.max(0, math.min(1, ratio))
+        sliders.enemyAvoidanceRadius.value = mathFloor(sliders.enemyAvoidanceRadius.min + (sliders.enemyAvoidanceRadius.max - sliders.enemyAvoidanceRadius.min) * ratio)
+        enemyAvoidanceRadius = sliders.enemyAvoidanceRadius.value
+        Spring.SetConfigInt("scv_enemyAvoidanceRadius", sliders.enemyAvoidanceRadius.value)
+        return true
     end
     return false
 end
@@ -1679,30 +1372,24 @@ function findReclaimableFeature(unitID, x, z, searchRadius, needMetal, needEnerg
           if featureDefID then
               local fDef = FeatureDefs[featureDefID]
               if fDef and fDef.reclaimable then
-                  -- Commander exclusion logic (no goto)
-                  local isCommanderWreck = checkboxes.excludeCommanders.state and fDef.customParams and fDef.customParams.fromunit and commanderNames[fDef.customParams.fromunit]
-                  if not isCommanderWreck then
-                      local fx, _, fz = Spring.GetFeaturePosition(featureID)
-                      local dist      = math.sqrt((x - fx)^2 + (z - fz)^2)
-                      local fMetal    = fDef.metal  or 0
-                      local fEnergy   = fDef.energy or 0
+                  local fx, _, fz = Spring.GetFeaturePosition(featureID)
+                  local dist      = math.sqrt((x - fx)^2 + (z - fz)^2)
+                  local fMetal    = fDef.metal  or 0
+                  local fEnergy   = fDef.energy or 0
 
-                      local effectiveMetal  = needMetal  and fMetal  or 0
-                      local effectiveEnergy = needEnergy and fEnergy or 0
+                  local effectiveMetal  = needMetal  and fMetal  or 0
+                  local effectiveEnergy = needEnergy and fEnergy or 0
 
-                      if (effectiveMetal + effectiveEnergy) > 0 then
-                          local score = dist * dynamicWeightDistance
-                          score       = score - (effectiveMetal + effectiveEnergy)
+                  if (effectiveMetal + effectiveEnergy) > 0 then
+                      local score = dist * dynamicWeightDistance
+                      score       = score - (effectiveMetal + effectiveEnergy)
 
-                          -- Also ensure we haven't exceeded maxUnitsPerFeature
-                          local alreadyTargetedCount = targetedFeatures[featureID] or 0
-                          if (score < bestScore) and (alreadyTargetedCount < maxUnitsPerFeature) then
-                              bestScore   = score
-                              bestFeature = featureID
-                          end
+                      -- Also ensure we haven't exceeded maxUnitsPerFeature
+                      local alreadyTargetedCount = targetedFeatures[featureID] or 0
+                      if (score < bestScore) and (alreadyTargetedCount < maxUnitsPerFeature) then
+                          bestScore   = score
+                          bestFeature = featureID
                       end
-                  else
-                      scvlog("Skipping commander wreck for featureID", featureID)
                   end
               end
           end
