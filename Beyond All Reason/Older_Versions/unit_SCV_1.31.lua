@@ -6,7 +6,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.32",
+    version   = "v1.31",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -125,10 +125,10 @@ end
 local function giveScriptOrder(unitID, cmdID, cmdParams, cmdOpts)
   local currentFrame = Spring.GetGameFrame()
   
-  -- Clean up old entries (older than 60 frames to match our detection window)
+  -- Clean up old entries (older than 30 frames)
   for key, _ in pairs(scriptIssuedCommands) do
     local frameStr = key:match("_(%d+)$")
-    if frameStr and (currentFrame - tonumber(frameStr)) > 60 then
+    if frameStr and (currentFrame - tonumber(frameStr)) > 30 then
       scriptIssuedCommands[key] = nil
     end
   end
@@ -940,13 +940,13 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
     local currentFrame = Spring.GetGameFrame()
     local isScriptCommand = false
     
-    -- Check if this matches any recent script-issued command (more flexible range for delayed execution)
+    -- Check if this matches any recent script-issued command (more flexible range)
     for key, _ in pairs(scriptIssuedCommands) do
       local keyUnitID, keyCmdID, keyFrame = key:match("^(%d+)_(%d+)_(%d+)$")
       if keyUnitID and keyCmdID and keyFrame then
         if tonumber(keyUnitID) == unitID and 
            tonumber(keyCmdID) == cmdID and 
-           math.abs(currentFrame - tonumber(keyFrame)) <= 30 then  -- Increased to 30 frames (1 second) for delayed commands
+           math.abs(currentFrame - tonumber(keyFrame)) <= 5 then  -- Increased to 5 frames
           isScriptCommand = true
           scriptIssuedCommands[key] = nil  -- Clean up this specific key
           break
@@ -955,44 +955,22 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
     end
     
     if not isScriptCommand then
-      -- Check if this is a RezBot that should be tracked but isn't
+      -- This is a player command - DETAILED DEBUG for this issue
+      Spring.Echo("=== MANUAL COMMAND DETECTED ===")
+      Spring.Echo("Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
+      Spring.Echo("Available tracked commands:")
+      for key, _ in pairs(scriptIssuedCommands) do
+        Spring.Echo("  " .. key)
+      end
+      Spring.Echo("=== END DEBUG ===")
+      
+      manuallyCommandedUnits[unitID] = true
+      scvlog("Unit", unitID, "has been manually commanded by player (cmd", cmdID, "), disabling automated behavior")
+      
+      -- If the unit was doing automated tasks, clean up its state
       local unitData = unitsToCollect[unitID]
-      if not unitData and isMyResbot(unitID, unitDefID) then
-        -- This is a RezBot that exists but wasn't properly registered
-        Spring.Echo("Auto-registering missing RezBot: Unit " .. unitID)
-        unitsToCollect[unitID] = {
-          featureCount = 0,
-          lastReclaimedFrame = 0,
-          taskStatus = "idle"
-        }
-        unitData = unitsToCollect[unitID]
-        
-        -- Don't flag this as manual - it's just an untracked unit getting commands
-        scvlog("Unit", unitID, "was auto-registered, treating command as normal behavior")
-      else
-        -- This is a legitimate manual command
-        Spring.Echo("=== MANUAL COMMAND DETECTED ===")
-        Spring.Echo("Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
-        Spring.Echo("Unit is RezBot: " .. tostring(isMyResbot(unitID, unitDefID)))
-        if unitData then
-          Spring.Echo("Unit task status: " .. (unitData.taskStatus or "nil"))
-          Spring.Echo("Unit feature target: " .. (unitData.featureID or "nil"))
-        else
-          Spring.Echo("Unit not in unitsToCollect table")
-        end
-        Spring.Echo("Available tracked commands:")
-        for key, _ in pairs(scriptIssuedCommands) do
-          Spring.Echo("  " .. key)
-        end
-        Spring.Echo("=== END DEBUG ===")
-        
-        manuallyCommandedUnits[unitID] = true
-        scvlog("Unit", unitID, "has been manually commanded by player (cmd", cmdID, "), disabling automated behavior")
-        
-        -- If the unit was doing automated tasks, clean up its state
-        if unitData then
-          unitData.taskStatus = "manual_override"
-        end
+      if unitData then
+        unitData.taskStatus = "manual_override"
       end
     else
       scvlog("Unit", unitID, "received script command (cmd", cmdID, "), continuing automation")
@@ -1010,40 +988,6 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
       taskStatus = "idle"  -- Set the task status to "idle" when the unit is created
     }
     processUnits({[unitID] = unitsToCollect[unitID]})
-  end
-end
-
--- Handle resurrected units (they trigger UnitFinished, not always UnitCreated)
-function widget:UnitFinished(unitID, unitDefID, unitTeam)
-  if isMyResbot(unitID, unitDefID) then
-    local unitData = unitsToCollect[unitID]
-    
-    if not unitData then
-      -- This unit wasn't registered in UnitCreated (likely resurrected)
-      scvlog("Resbot finished (likely resurrected): UnitID = " .. unitID)
-      unitsToCollect[unitID] = {
-        featureCount = 0,
-        lastReclaimedFrame = 0,
-        taskStatus = "idle"
-      }
-      processUnits({[unitID] = unitsToCollect[unitID]})
-    else
-      -- Unit already exists (normal build process), just ensure proper state
-      scvlog("Resbot finished normally: UnitID = " .. unitID)
-      
-      -- Clear any manual command flags from when it was dead
-      if manuallyCommandedUnits[unitID] then
-        manuallyCommandedUnits[unitID] = nil
-        scvlog("Cleared manual command flag for finished unit", unitID)
-      end
-      
-      -- Ensure it's in idle state and ready for tasks (avoid double processUnits call)
-      if unitData.taskStatus ~= "idle" then
-        scvlog("Resetting finished RezBot to idle: UnitID = " .. unitID)
-        unitData.taskStatus = "idle"
-        -- Don't call processUnits here - let the normal GameFrame logic handle it
-      end
-    end
   end
 end
 
