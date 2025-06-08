@@ -6,7 +6,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.37",
+    version   = "v1.35",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -43,8 +43,8 @@ local processedManualCommands = {}  -- Track manual commands to prevent duplicat
 local activeResurrections = {}  -- [featureID] = {unitID1, unitID2, ...} for features being resurrected
 local interruptedResurrections = {}  -- [unitID] = {featureID, startFrame, attempts} for interrupted resurrections
 local UNREACHABLE_EXPIRE_FRAMES = 3000  -- Number of frames to keep marking something as unreachable (e.g., ~2 min)
-local maxUnitsPerFeature = 4  -- Maximum units allowed to target the same feature (dynamically scaled)
-local maxHealersPerUnit = 4  -- Maximum number of healers per unit (dynamically scaled)
+local maxUnitsPerFeature = 4  -- Maximum units allowed to target the same feature
+local maxHealersPerUnit = 4  -- Maximum number of healers per unit
 local healResurrectRadius = 1000 -- Set your desired heal/resurrect radius here  (default 1000)
 local reclaimRadius = 1500 -- Set your desired reclaim radius here (any number works, 4000 is about half a large map)
 local enemyAvoidanceRadius = 675  -- Adjust this value as needed -- Define a safe distance for enemy avoidance
@@ -543,44 +543,6 @@ end
 
 
 
--- /////////////////////////////////////////// Dynamic Scaling Functions
--- Function to count idle workers (units with taskStatus "idle")
-local function countIdleWorkers()
-  local idleCount = 0
-  for unitID, unitData in pairs(unitsToCollect) do
-    local unitDefID = spGetUnitDefID(unitID)
-    if isMyResbot(unitID, unitDefID) then
-      if unitData.taskStatus == "idle" and not manuallyCommandedUnits[unitID] then
-        idleCount = idleCount + 1
-      end
-    end
-  end
-  scvlog("Counted", idleCount, "idle workers")
-  return idleCount
-end
-
--- Function to calculate dynamic max values based on idle worker count
-local function getDynamicMaxValues()
-  local idleWorkers = countIdleWorkers()
-  local bonusFromIdle = math.floor(idleWorkers / 5)  -- +1 for every 5 idle workers
-  
-  local dynamicMaxUnitsPerFeature = 4 + bonusFromIdle  -- Base 4 + bonus
-  local dynamicMaxHealersPerUnit = 4 + bonusFromIdle   -- Base 4 + bonus
-  
-  if bonusFromIdle > 0 then
-    scvlog("Dynamic scaling: ", idleWorkers, "idle workers ->", bonusFromIdle, "bonus ->", 
-           "maxUnitsPerFeature:", dynamicMaxUnitsPerFeature, "maxHealersPerUnit:", dynamicMaxHealersPerUnit)
-  end
-  
-  return dynamicMaxUnitsPerFeature, dynamicMaxHealersPerUnit
-end
-
--- Function to update the global max values (called periodically)
-local function updateDynamicMaxValues()
-  maxUnitsPerFeature, maxHealersPerUnit = getDynamicMaxValues()
-end
-
-
 -- ///////////////////////////////////////////  isMyResbot Function 
 -- Updated isMyResbot function
   function isMyResbot(unitID, unitDefID)
@@ -964,16 +926,7 @@ function processUnits(units)
     local unitDefID = spGetUnitDefID(unitID)
     if isMyResbot(unitID, unitDefID) then
 
-      -- 1) HIGHEST PRIORITY: Emergency healing for critically close units (<425 distance)
-      if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
-        local nearestDamagedUnit, distance = findNearestDamagedFriendly(unitID, healResurrectRadius)
-        if nearestDamagedUnit and distance < 425 then
-          scvlog("Unit", unitID, "performing emergency healing - damaged unit at", distance, "distance")
-          performHealing(unitID, unitData)
-        end
-      end
-
-      -- 2) SECOND PRIORITY: Resume interrupted resurrections
+      -- 0) HIGHEST PRIORITY: Resume interrupted resurrections
       if interruptedResurrections[unitID] and unitData.taskStatus ~= "in_progress" then
         local interrupted = interruptedResurrections[unitID]
         if Spring.ValidFeatureID(interrupted.featureID) then
@@ -999,10 +952,7 @@ function processUnits(units)
               unitData.taskStatus = "in_progress"
               resurrectingUnits[unitID] = true
               
-              -- Update dynamic scaling since unit is no longer idle
-              updateDynamicMaxValues()
-              
-              return  -- Exit after issuing the first valid order
+              return  -- Skip to next unit
             else
               scvlog("Unit", unitID, "cannot resume resurrection - feature", interrupted.featureID, "at unit limit")
             end
@@ -1014,17 +964,26 @@ function processUnits(units)
         interruptedResurrections[unitID] = nil
       end
 
-      -- 3) Resurrecting Logic
+      -- 1) Check for nearby damaged units (high-priority if <= 475 distance)
+      --    If it finds a unit to heal, it sets "taskStatus = in_progress"
+      if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
+        local nearestDamagedUnit, distance = findNearestDamagedFriendly(unitID, healResurrectRadius)
+        if nearestDamagedUnit and distance <= 475 then
+          performHealing(unitID, unitData)
+        end
+      end
+
+      -- 2) Resurrecting Logic
       if checkboxes.resurrecting.state and unitData.taskStatus ~= "in_progress" then
         performResurrection(unitID, unitData)
       end
 
-      -- 4) Collecting Logic
+      -- 3) Collecting Logic
       if checkboxes.collecting.state and unitData.taskStatus ~= "in_progress" then
         performCollection(unitID, unitData)
       end
 
-      -- 5) Healing Logic (all other damaged units not covered by emergency healing)
+      -- 4) Healing Logic (e.g. no immediate damaged units found in step 1)
       if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
         performHealing(unitID, unitData)
       end
@@ -1311,14 +1270,8 @@ function widget:GameFrame(currentFrame)
   local stuckCheckInterval     = 300   -- Reduced from 1000 to 300 (10 seconds instead of 33)
   local resourceCheckInterval  = 150   -- Interval to check and reassign tasks
   local actionInterval         = 30
-  local dynamicScalingInterval = 60    -- Update dynamic scaling every 2 seconds
 
-  -- 1) Update dynamic scaling every 60 frames (2 seconds)
-  if (currentFrame % dynamicScalingInterval == 0) then
-    updateDynamicMaxValues()
-  end
-
-  -- 2) Only run main actions every 'actionInterval' frames
+  -- 1) Only run main actions every 'actionInterval' frames
   if (currentFrame % actionInterval == 0) then
     for unitID, unitData in pairs(unitsToCollect) do
       local unitDefID = Spring.GetUnitDefID(unitID)
@@ -1346,7 +1299,7 @@ function widget:GameFrame(currentFrame)
     end
   end
 
-  -- 3) Periodically check if units are stuck
+  -- 2) Periodically check if units are stuck
   if (currentFrame % stuckCheckInterval == 0) then
     for unitID, _ in pairs(unitsToCollect) do
       local unitDefID = Spring.GetUnitDefID(unitID)
@@ -1359,7 +1312,7 @@ function widget:GameFrame(currentFrame)
     end
   end
 
-  -- 4) Periodically check resource needs & reassign tasks if necessary
+  -- 3) Periodically check resource needs & reassign tasks if necessary
   if (currentFrame % resourceCheckInterval == 0) then
     local resourceNeed = assessResourceNeeds()
     if resourceNeed ~= "full" then
@@ -1377,7 +1330,7 @@ function widget:GameFrame(currentFrame)
     end
   end
 
-  -- 5) Once every 60 frames, remove unreachable entries older than UNREACHABLE_EXPIRE_FRAMES
+  -- 4) Once every 60 frames, remove unreachable entries older than UNREACHABLE_EXPIRE_FRAMES
   if (currentFrame % 60 == 0) then
     for featID, markedFrame in pairs(unreachableFeatures) do
       if (currentFrame - markedFrame) > UNREACHABLE_EXPIRE_FRAMES then
@@ -1395,7 +1348,7 @@ function widget:GameFrame(currentFrame)
     end
   end
 
-  -- 6) Check for units idle too long and send them to safety (only every 150 frames)
+  -- 5) Check for units idle too long and send them to safety (only every 150 frames)
   if (currentFrame % 150 == 0) then
     for unitID, unitData in pairs(unitsToCollect) do
       local unitDefID = spGetUnitDefID(unitID)
@@ -1490,7 +1443,6 @@ function widget:GameFrame(currentFrame)
                 end
               end
             end
-          end
           -- Don't reset idle timer here - let it accumulate until unit gets a real task
         end
       else
@@ -1498,6 +1450,7 @@ function widget:GameFrame(currentFrame)
         lastIdleFrame[unitID] = currentFrame
       end
     end
+  end
   end  -- End of idle regroup interval check
   
   -- RACE CONDITION FIX: Process all queued units atomically at the end of the frame
@@ -1593,14 +1546,7 @@ end
 
 -- ///////////////////////////////////////////  maintainSafeDistanceFromEnemy Function
 function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
-  -- Emergency healers are more aggressive - reduce safety range by 40%
-  local actualAvoidanceRadius = defaultAvoidanceRadius
-  if unitData.taskType == "healing" then
-    actualAvoidanceRadius = defaultAvoidanceRadius * 0.6  -- 40% reduction for healers
-    scvlog("Unit", unitID, "using reduced safety range for healing:", actualAvoidanceRadius, "(was", defaultAvoidanceRadius .. ")")
-  end
-  
-  local nearestEnemy, distance, isAirUnit = findNearestEnemy(unitID, actualAvoidanceRadius)
+  local nearestEnemy, distance, isAirUnit = findNearestEnemy(unitID, defaultAvoidanceRadius)
   
   -- Debug logging to track enemy detection
   if nearestEnemy then
@@ -1610,11 +1556,11 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
     local enemyTeam = Spring.GetUnitTeam(nearestEnemy)
     local myTeam = Spring.GetMyTeamID()
     local isAlly = Spring.AreTeamsAllied(myTeam, enemyTeam)
-    scvlog("Unit", unitID, "detected enemy", nearestEnemy, "at distance", distance, "avoidance radius", actualAvoidanceRadius)
+    scvlog("Unit", unitID, "detected enemy", nearestEnemy, "at distance", distance, "avoidance radius", defaultAvoidanceRadius)
     scvlog("ENEMY DEBUG: Unit " .. nearestEnemy .. " DefID: " .. (enemyDefID or "nil") .. " Name: " .. (enemyDef and enemyDef.name or "unknown") .. " Team: " .. (enemyTeam or "nil") .. " MyTeam: " .. myTeam .. " Allied: " .. tostring(isAlly) .. " Dead: " .. tostring(Spring.GetUnitIsDead(nearestEnemy)))
   end
   
-  if nearestEnemy and distance < actualAvoidanceRadius then
+  if nearestEnemy and distance < defaultAvoidanceRadius then
     -- Check if unit is currently resurrecting - save progress before fleeing
     if unitData.taskType == "resurrecting" and unitData.featureID then
       local featureID = unitData.featureID
@@ -1668,7 +1614,7 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
 
     -- Try to find the nearest combat unit to run toward
     local myTeamID = spGetMyTeamID()
-    local searchRadius = actualAvoidanceRadius * 2
+    local searchRadius = defaultAvoidanceRadius * 2
     local unitsInRadius = Spring.GetUnitsInCylinder(ux, uz, searchRadius)
     local minDistSq = math.huge
     local nearestFriendly = nil
@@ -1716,8 +1662,8 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
       local dx, dz = (ux - ex), (uz - ez)
       local mag = math.sqrt(dx*dx + dz*dz)
       if mag < 1e-6 then mag = 1 end
-      safeX = ux + (dx / mag * actualAvoidanceRadius)
-      safeZ = uz + (dz / mag * actualAvoidanceRadius)
+      safeX = ux + (dx / mag * defaultAvoidanceRadius)
+      safeZ = uz + (dz / mag * defaultAvoidanceRadius)
       safeY = Spring.GetGroundHeight(safeX, safeZ)
     end
 
@@ -1924,22 +1870,13 @@ function performHealing(unitID, unitData)
 
       healingTargets[nearestDamagedUnit] = healingTargets[nearestDamagedUnit] or 0
       
-      -- Emergency healing allows double the normal healer limit for critical units
-      local healerLimit = maxHealersPerUnit
-      if distance < 425 then
-        healerLimit = maxHealersPerUnit * 2  -- Double healers for emergency situations
-        scvlog("Emergency healing situation - allowing", healerLimit, "healers for unit", nearestDamagedUnit, "at distance", distance)
-      end
-      
-      if healingTargets[nearestDamagedUnit] < healerLimit and not healingUnits[unitID] then
+      if healingTargets[nearestDamagedUnit] < maxHealersPerUnit and not healingUnits[unitID] then
           scvlog("Unit", unitID, "is healing unit", nearestDamagedUnit)
           giveScriptOrder(unitID, CMD.REPAIR, {nearestDamagedUnit}, {})
           healingUnits[unitID] = nearestDamagedUnit
           healingTargets[nearestDamagedUnit] = healingTargets[nearestDamagedUnit] + 1
           unitData.taskType = "healing"
           unitData.taskStatus = "in_progress"
-          -- Update dynamic scaling since unit is no longer idle
-          updateDynamicMaxValues()
       else
           scvlog("Healing target already has maximum healers or unit", unitID, "is already assigned to healing")
           unitData.taskStatus = "idle"
@@ -1992,8 +1929,6 @@ function performCollection(unitID, unitData)
       
       unitData.taskType           = "reclaiming"
       unitData.taskStatus         = "in_progress"
-      -- Update dynamic scaling since unit is no longer idle
-      updateDynamicMaxValues()
       return true
   else
       -- CLEANUP: If findReclaimableFeature reserved a slot but the feature is now invalid, clean up the reservation
@@ -2047,8 +1982,12 @@ function performResurrection(unitID, unitData)
                       unitData.taskStatus = "in_progress"
                       resurrectingUnits[unitID] = true
                       
-                      -- Update dynamic scaling since unit is no longer idle
-                      updateDynamicMaxValues()
+                      -- Debug: Check final count
+                      local finalCount = targetedFeatures[featureID]
+                      scvlog("Feature", featureID, "final resurrection count:", finalCount, "(limit:", maxUnitsPerFeature, ")")
+                      if finalCount > maxUnitsPerFeature then
+                          Spring.Echo("WARNING: Feature " .. featureID .. " exceeded resurrection limit! Has " .. finalCount .. " units (max " .. maxUnitsPerFeature .. ")")
+                      end
                       
                       return  -- Exit after issuing the first valid order
                   else
@@ -2166,9 +2105,6 @@ function widget:UnitIdle(unitID)
     manuallyCommandedUnits[unitID] = nil
     scvlog("Unit", unitID, "is now idle, re-enabling automated behavior")
   end
-
-  -- Update dynamic scaling since we now have a new idle unit
-  updateDynamicMaxValues()
 
   -- Immediately reassign a new task for the unit
   if (unitDef.canReclaim and checkboxes.collecting.state) or

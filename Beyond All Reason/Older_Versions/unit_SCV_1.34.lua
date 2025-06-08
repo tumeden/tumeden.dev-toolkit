@@ -6,7 +6,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.37",
+    version   = "v1.34",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -39,12 +39,9 @@ local lastProgressCheck = {}  -- Track when units last made progress toward thei
 local lastStuckCheck = {}  -- Track when each unit was last checked for being stuck
 local scriptIssuedCommands = {}  -- Track commands issued by the script itself
 local pendingProcessUnits = {}  -- Queue for units that need processing to prevent race conditions
-local processedManualCommands = {}  -- Track manual commands to prevent duplicate detection within same frame
-local activeResurrections = {}  -- [featureID] = {unitID1, unitID2, ...} for features being resurrected
-local interruptedResurrections = {}  -- [unitID] = {featureID, startFrame, attempts} for interrupted resurrections
 local UNREACHABLE_EXPIRE_FRAMES = 3000  -- Number of frames to keep marking something as unreachable (e.g., ~2 min)
-local maxUnitsPerFeature = 4  -- Maximum units allowed to target the same feature (dynamically scaled)
-local maxHealersPerUnit = 4  -- Maximum number of healers per unit (dynamically scaled)
+local maxUnitsPerFeature = 4  -- Maximum units allowed to target the same feature
+local maxHealersPerUnit = 4  -- Maximum number of healers per unit
 local healResurrectRadius = 1000 -- Set your desired heal/resurrect radius here  (default 1000)
 local reclaimRadius = 1500 -- Set your desired reclaim radius here (any number works, 4000 is about half a large map)
 local enemyAvoidanceRadius = 675  -- Adjust this value as needed -- Define a safe distance for enemy avoidance
@@ -129,10 +126,10 @@ end
 local function giveScriptOrder(unitID, cmdID, cmdParams, cmdOpts)
   local currentFrame = Spring.GetGameFrame()
   
-  -- Clean up old entries (older than 120 frames to match our detection window)
+  -- Clean up old entries (older than 60 frames to match our detection window)
   for key, _ in pairs(scriptIssuedCommands) do
     local frameStr = key:match("_(%d+)$")
-    if frameStr and (currentFrame - tonumber(frameStr)) > 120 then
+    if frameStr and (currentFrame - tonumber(frameStr)) > 60 then
       scriptIssuedCommands[key] = nil
     end
   end
@@ -543,44 +540,6 @@ end
 
 
 
--- /////////////////////////////////////////// Dynamic Scaling Functions
--- Function to count idle workers (units with taskStatus "idle")
-local function countIdleWorkers()
-  local idleCount = 0
-  for unitID, unitData in pairs(unitsToCollect) do
-    local unitDefID = spGetUnitDefID(unitID)
-    if isMyResbot(unitID, unitDefID) then
-      if unitData.taskStatus == "idle" and not manuallyCommandedUnits[unitID] then
-        idleCount = idleCount + 1
-      end
-    end
-  end
-  scvlog("Counted", idleCount, "idle workers")
-  return idleCount
-end
-
--- Function to calculate dynamic max values based on idle worker count
-local function getDynamicMaxValues()
-  local idleWorkers = countIdleWorkers()
-  local bonusFromIdle = math.floor(idleWorkers / 5)  -- +1 for every 5 idle workers
-  
-  local dynamicMaxUnitsPerFeature = 4 + bonusFromIdle  -- Base 4 + bonus
-  local dynamicMaxHealersPerUnit = 4 + bonusFromIdle   -- Base 4 + bonus
-  
-  if bonusFromIdle > 0 then
-    scvlog("Dynamic scaling: ", idleWorkers, "idle workers ->", bonusFromIdle, "bonus ->", 
-           "maxUnitsPerFeature:", dynamicMaxUnitsPerFeature, "maxHealersPerUnit:", dynamicMaxHealersPerUnit)
-  end
-  
-  return dynamicMaxUnitsPerFeature, dynamicMaxHealersPerUnit
-end
-
--- Function to update the global max values (called periodically)
-local function updateDynamicMaxValues()
-  maxUnitsPerFeature, maxHealersPerUnit = getDynamicMaxValues()
-end
-
-
 -- ///////////////////////////////////////////  isMyResbot Function 
 -- Updated isMyResbot function
   function isMyResbot(unitID, unitDefID)
@@ -964,67 +923,26 @@ function processUnits(units)
     local unitDefID = spGetUnitDefID(unitID)
     if isMyResbot(unitID, unitDefID) then
 
-      -- 1) HIGHEST PRIORITY: Emergency healing for critically close units (<425 distance)
+      -- 1) Check for nearby damaged units (high-priority if <= 475 distance)
+      --    If it finds a unit to heal, it sets "taskStatus = in_progress"
       if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
         local nearestDamagedUnit, distance = findNearestDamagedFriendly(unitID, healResurrectRadius)
-        if nearestDamagedUnit and distance < 425 then
-          scvlog("Unit", unitID, "performing emergency healing - damaged unit at", distance, "distance")
+        if nearestDamagedUnit and distance <= 475 then
           performHealing(unitID, unitData)
         end
       end
 
-      -- 2) SECOND PRIORITY: Resume interrupted resurrections
-      if interruptedResurrections[unitID] and unitData.taskStatus ~= "in_progress" then
-        local interrupted = interruptedResurrections[unitID]
-        if Spring.ValidFeatureID(interrupted.featureID) then
-          local featureDef = FeatureDefs[Spring.GetFeatureDefID(interrupted.featureID)]
-          if featureDef and featureDef.resurrectable then
-            -- Check if feature is still available (not at unit limit)
-            local currentTargets = targetedFeatures[interrupted.featureID] or 0
-            if currentTargets < maxUnitsPerFeature then
-              scvlog("Unit", unitID, "resuming interrupted resurrection of feature", interrupted.featureID, "(attempt", interrupted.attempts .. ")")
-              
-              -- Reserve the feature
-              targetedFeatures[interrupted.featureID] = currentTargets + 1
-              
-              -- Track active resurrection
-              activeResurrections[interrupted.featureID] = activeResurrections[interrupted.featureID] or {}
-              table.insert(activeResurrections[interrupted.featureID], unitID)
-              
-              -- Clear the interruption and resume
-              interruptedResurrections[unitID] = nil
-              giveScriptOrder(unitID, CMD.RESURRECT, {interrupted.featureID + Game.maxUnits}, {})
-              unitData.featureID = interrupted.featureID
-              unitData.taskType = "resurrecting"
-              unitData.taskStatus = "in_progress"
-              resurrectingUnits[unitID] = true
-              
-              -- Update dynamic scaling since unit is no longer idle
-              updateDynamicMaxValues()
-              
-              return  -- Exit after issuing the first valid order
-            else
-              scvlog("Unit", unitID, "cannot resume resurrection - feature", interrupted.featureID, "at unit limit")
-            end
-          end
-        end
-        
-        -- Feature no longer exists/resurrectable or at limit
-        scvlog("Unit", unitID, "abandoning interrupted resurrection - feature no longer valid/available")
-        interruptedResurrections[unitID] = nil
-      end
-
-      -- 3) Resurrecting Logic
+      -- 2) Resurrecting Logic
       if checkboxes.resurrecting.state and unitData.taskStatus ~= "in_progress" then
         performResurrection(unitID, unitData)
       end
 
-      -- 4) Collecting Logic
+      -- 3) Collecting Logic
       if checkboxes.collecting.state and unitData.taskStatus ~= "in_progress" then
         performCollection(unitID, unitData)
       end
 
-      -- 5) Healing Logic (all other damaged units not covered by emergency healing)
+      -- 4) Healing Logic (e.g. no immediate damaged units found in step 1)
       if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
         performHealing(unitID, unitData)
       end
@@ -1046,30 +964,13 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
     local currentFrame = Spring.GetGameFrame()
     local isScriptCommand = false
     
-    -- Grace period for newly created units (ignore commands in first 5 seconds)
-    local unitData = unitsToCollect[unitID]
-    if unitData and unitData.createdFrame then
-      local framesSinceCreation = currentFrame - unitData.createdFrame
-      if framesSinceCreation < 150 then  -- 5 seconds at 30fps
-        scvlog("Ignoring command for newly created unit", unitID, "- grace period active (", framesSinceCreation, "frames since creation)")
-        return
-      end
-    end
-    
-    -- Prevent duplicate manual command detection within the same frame
-    local manualKey = unitID .. "_" .. cmdID .. "_" .. currentFrame
-    if processedManualCommands[manualKey] then
-      scvlog("Duplicate manual command detected for unit", unitID, "cmd", cmdID, "frame", currentFrame, "- ignoring")
-      return  -- Already processed this command in this frame
-    end
-    
     -- Check if this matches any recent script-issued command (more flexible range for delayed execution)
     for key, _ in pairs(scriptIssuedCommands) do
       local keyUnitID, keyCmdID, keyFrame = key:match("^(%d+)_(%d+)_(%d+)$")
       if keyUnitID and keyCmdID and keyFrame then
         if tonumber(keyUnitID) == unitID and 
            tonumber(keyCmdID) == cmdID and 
-           math.abs(currentFrame - tonumber(keyFrame)) <= 90 then  -- Increased to 90 frames (3 seconds) for very delayed commands
+           math.abs(currentFrame - tonumber(keyFrame)) <= 30 then  -- Increased to 30 frames (1 second) for delayed commands
           isScriptCommand = true
           scriptIssuedCommands[key] = nil  -- Clean up this specific key
           break
@@ -1078,19 +979,6 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
     end
     
     if not isScriptCommand then
-      -- DEBUG: Show what we're looking for vs what we have
-      scvlog("COMMAND DEBUG: Looking for", unitID .. "_" .. cmdID .. "_" .. currentFrame, "±90 frames")
-      scvlog("COMMAND DEBUG: Available script commands:")
-      for key, _ in pairs(scriptIssuedCommands) do
-        local keyUnitID, keyCmdID, keyFrame = key:match("^(%d+)_(%d+)_(%d+)$")
-        if keyUnitID and keyCmdID and keyFrame then
-          local frameDiff = math.abs(currentFrame - tonumber(keyFrame))
-          local unitMatch = tonumber(keyUnitID) == unitID
-          local cmdMatch = tonumber(keyCmdID) == cmdID
-          scvlog("  ", key, "- UnitMatch:", unitMatch, "CmdMatch:", cmdMatch, "FrameDiff:", frameDiff)
-        end
-      end
-      
       -- Check if this is a RezBot that should be tracked but isn't
       local unitData = unitsToCollect[unitID]
       if not unitData and isMyResbot(unitID, unitDefID) then
@@ -1112,26 +1000,23 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
         Spring.Echo("Unit is RezBot: " .. tostring(isMyResbot(unitID, unitDefID)))
         if unitData then
           Spring.Echo("Unit task status: " .. (unitData.taskStatus or "nil"))
-                  Spring.Echo("Unit feature target: " .. (unitData.featureID or "nil"))
-      else
-        Spring.Echo("Unit not in unitsToCollect table")
-      end
-      Spring.Echo("Available tracked commands:")
-      for key, _ in pairs(scriptIssuedCommands) do
-        Spring.Echo("  " .. key)
-      end
-      Spring.Echo("=== END DEBUG ===")
-      
-      -- Mark this command as processed to prevent duplicate detection
-      processedManualCommands[manualKey] = true
-      
-      manuallyCommandedUnits[unitID] = true
-      scvlog("Unit", unitID, "has been manually commanded by player (cmd", cmdID, "), disabling automated behavior")
-      
-      -- If the unit was doing automated tasks, clean up its state
-      if unitData then
-        unitData.taskStatus = "manual_override"
-      end
+          Spring.Echo("Unit feature target: " .. (unitData.featureID or "nil"))
+        else
+          Spring.Echo("Unit not in unitsToCollect table")
+        end
+        Spring.Echo("Available tracked commands:")
+        for key, _ in pairs(scriptIssuedCommands) do
+          Spring.Echo("  " .. key)
+        end
+        Spring.Echo("=== END DEBUG ===")
+        
+        manuallyCommandedUnits[unitID] = true
+        scvlog("Unit", unitID, "has been manually commanded by player (cmd", cmdID, "), disabling automated behavior")
+        
+        -- If the unit was doing automated tasks, clean up its state
+        if unitData then
+          unitData.taskStatus = "manual_override"
+        end
       end
     else
       scvlog("Unit", unitID, "received script command (cmd", cmdID, "), continuing automation")
@@ -1146,8 +1031,7 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
     unitsToCollect[unitID] = {
       featureCount = 0,
       lastReclaimedFrame = 0,
-      taskStatus = "idle",  -- Set the task status to "idle" when the unit is created
-      createdFrame = Spring.GetGameFrame()  -- Track creation frame for grace period
+      taskStatus = "idle"  -- Set the task status to "idle" when the unit is created
     }
     queueUnitForProcessing(unitID, unitsToCollect[unitID])
   end
@@ -1167,8 +1051,7 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
       unitsToCollect[unitID] = {
         featureCount = 0,
         lastReclaimedFrame = 0,
-        taskStatus = "idle",
-        createdFrame = Spring.GetGameFrame()  -- Track creation frame for grace period
+        taskStatus = "idle"
       }
       queueUnitForProcessing(unitID, unitsToCollect[unitID])
       -- Process queued units immediately for resurrected units  
@@ -1216,11 +1099,6 @@ function widget:UnitDestroyed(unitID, unitDefID, teamID)
     -- Clean up position tracking
     if unitLastPosition[unitID] then
         unitLastPosition[unitID] = nil
-    end
-    
-    -- Clean up resurrection tracking
-    if interruptedResurrections[unitID] then
-        interruptedResurrections[unitID] = nil
     end
   end
   
@@ -1285,20 +1163,6 @@ function widget:FeatureDestroyed(featureID, allyTeam)
   end
   targetedFeatures[featureID] = nil  -- Clear the target as the feature is destroyed
   
-  -- Clean up active resurrection tracking
-  if activeResurrections[featureID] then
-    scvlog("Feature", featureID, "destroyed - clearing active resurrection tracking for", #activeResurrections[featureID], "units")
-    activeResurrections[featureID] = nil
-  end
-  
-  -- Clean up any interrupted resurrections for this feature  
-  for unitID, interrupted in pairs(interruptedResurrections) do
-    if interrupted.featureID == featureID then
-      scvlog("Feature", featureID, "destroyed - clearing interrupted resurrection for unit", unitID)
-      interruptedResurrections[unitID] = nil
-    end
-  end
-  
   -- Process any queued units from feature destruction
   processQueuedUnits()
 end
@@ -1311,14 +1175,8 @@ function widget:GameFrame(currentFrame)
   local stuckCheckInterval     = 300   -- Reduced from 1000 to 300 (10 seconds instead of 33)
   local resourceCheckInterval  = 150   -- Interval to check and reassign tasks
   local actionInterval         = 30
-  local dynamicScalingInterval = 60    -- Update dynamic scaling every 2 seconds
 
-  -- 1) Update dynamic scaling every 60 frames (2 seconds)
-  if (currentFrame % dynamicScalingInterval == 0) then
-    updateDynamicMaxValues()
-  end
-
-  -- 2) Only run main actions every 'actionInterval' frames
+  -- 1) Only run main actions every 'actionInterval' frames
   if (currentFrame % actionInterval == 0) then
     for unitID, unitData in pairs(unitsToCollect) do
       local unitDefID = Spring.GetUnitDefID(unitID)
@@ -1346,7 +1204,7 @@ function widget:GameFrame(currentFrame)
     end
   end
 
-  -- 3) Periodically check if units are stuck
+  -- 2) Periodically check if units are stuck
   if (currentFrame % stuckCheckInterval == 0) then
     for unitID, _ in pairs(unitsToCollect) do
       local unitDefID = Spring.GetUnitDefID(unitID)
@@ -1359,7 +1217,7 @@ function widget:GameFrame(currentFrame)
     end
   end
 
-  -- 4) Periodically check resource needs & reassign tasks if necessary
+  -- 3) Periodically check resource needs & reassign tasks if necessary
   if (currentFrame % resourceCheckInterval == 0) then
     local resourceNeed = assessResourceNeeds()
     if resourceNeed ~= "full" then
@@ -1377,7 +1235,7 @@ function widget:GameFrame(currentFrame)
     end
   end
 
-  -- 5) Once every 60 frames, remove unreachable entries older than UNREACHABLE_EXPIRE_FRAMES
+  -- 4) Once every 60 frames, remove unreachable entries older than UNREACHABLE_EXPIRE_FRAMES
   if (currentFrame % 60 == 0) then
     for featID, markedFrame in pairs(unreachableFeatures) do
       if (currentFrame - markedFrame) > UNREACHABLE_EXPIRE_FRAMES then
@@ -1385,120 +1243,77 @@ function widget:GameFrame(currentFrame)
         scvlog("FeatureID", featID, "is no longer marked unreachable")
       end
     end
-    
-    -- Clean up old manual command detection entries (older than 60 frames)
-    for key, _ in pairs(processedManualCommands) do
-      local frameStr = key:match("_(%d+)$")
-      if frameStr and (currentFrame - tonumber(frameStr)) > 60 then
-        processedManualCommands[key] = nil
-      end
-    end
   end
 
-  -- 6) Check for units idle too long and send them to safety (only every 150 frames)
-  if (currentFrame % 150 == 0) then
-    for unitID, unitData in pairs(unitsToCollect) do
-      local unitDefID = spGetUnitDefID(unitID)
-      if isMyResbot(unitID, unitDefID) then
-        -- Only handle truly idle units that haven't been manually commanded
-        if unitData.taskStatus == "idle" and not manuallyCommandedUnits[unitID] then
-          -- Initialize idle timer if not set
-          if not lastIdleFrame[unitID] then
-            lastIdleFrame[unitID] = currentFrame
-          end
-          
-                    -- Don't check if unit is already fleeing or returning
-          if not unitsMovingToSafety[unitID] and unitData.taskStatus ~= "returning_to_friendly" then
-            local timeIdle = currentFrame - lastIdleFrame[unitID]
-            if timeIdle >= IDLE_TIMEOUT_FRAMES then
-              local ux, uy, uz = Spring.GetUnitPosition(unitID)
-              if ux and uz then -- Sanity check
-                -- Quick check: are there any combat units nearby? If so, skip expensive regroup logic
-                local myTeamID = Spring.GetMyTeamID()
-                local quickCheckRadius = math.max(300, enemyAvoidanceRadius / 2)  -- Half of safe distance, minimum 300 units
-                local nearbyUnits = Spring.GetUnitsInCylinder(ux, uz, quickCheckRadius)
-                local hasCombatNearby = false
-                
-                for _, otherUnitID in ipairs(nearbyUnits) do
-                  if otherUnitID ~= unitID then
-                    local unitTeam = Spring.GetUnitTeam(otherUnitID)
-                    if unitTeam == myTeamID then
-                      local otherDefID = spGetUnitDefID(otherUnitID)
-                      local otherDef = UnitDefs[otherDefID]
-                      if otherDef and 
-                         not isMyResbot(otherUnitID, otherDefID) and 
-                         not otherDef.isAirUnit and 
-                         not otherDef.canRepair and 
-                         otherDef.weapons and #otherDef.weapons > 0 then
-                        hasCombatNearby = true
-                        break
-                      end
-                    end
-                  end
-                end
-                
-                if hasCombatNearby then
-                  scvlog("Unit " .. unitID .. " already has combat units nearby, skipping regroup")
-                  lastIdleFrame[unitID] = currentFrame  -- Reset idle timer
-                else
-                  -- No combat units nearby, do full regroup search
-                  scvlog("Unit " .. unitID .. " isolated, searching for regroup target")
-                  local searchRadius = idleRegroupRadius -- Use configurable idle regroup radius
-                  local unitsInRadius = Spring.GetUnitsInCylinder(ux, uz, searchRadius)
-                  local minDistSq = math.huge
-                  local nearestCombatUnit = nil
+  -- 5) Check for units idle too long and send them to safety
+  for unitID, unitData in pairs(unitsToCollect) do
+    local unitDefID = spGetUnitDefID(unitID)
+    if isMyResbot(unitID, unitDefID) then
+      -- Only handle truly idle units that haven't been manually commanded
+      if unitData.taskStatus == "idle" and not manuallyCommandedUnits[unitID] then
+        -- Don't check if unit is already fleeing or returning
+        if not unitsMovingToSafety[unitID] and unitData.taskStatus ~= "returning_to_friendly" then
+          local last = lastIdleFrame[unitID] or currentFrame
+          if currentFrame - last >= IDLE_TIMEOUT_FRAMES then
+            local ux, uy, uz = Spring.GetUnitPosition(unitID)
+            if ux and uz then -- Sanity check
+              -- Find nearest valid combat unit
+              local myTeamID = Spring.GetMyTeamID()
+              local searchRadius = idleRegroupRadius -- Use configurable idle regroup radius
+              local unitsInRadius = Spring.GetUnitsInCylinder(ux, uz, searchRadius)
+              local minDistSq = math.huge
+              local nearestCombatUnit = nil
 
-                  for _, otherUnitID in ipairs(unitsInRadius) do
-                    if otherUnitID ~= unitID then
-                      local unitTeam = Spring.GetUnitTeam(otherUnitID)
-                      if unitTeam == myTeamID then
-                        local otherDefID = spGetUnitDefID(otherUnitID)
-                        local otherDef = UnitDefs[otherDefID]
-                        -- Must be a combat unit (has weapons, not resbot, not air, not constructor)
-                        if otherDef and 
-                           not isMyResbot(otherUnitID, otherDefID) and 
-                           not otherDef.isAirUnit and 
-                           not otherDef.canRepair and 
-                           otherDef.weapons and #otherDef.weapons > 0 then
-                          
-                          local ox, oy, oz = Spring.GetUnitPosition(otherUnitID)
-                          if ox and oz then
-                            local distSq = (ux - ox)^2 + (uz - oz)^2
-                            if distSq < minDistSq then
-                              minDistSq = distSq
-                              nearestCombatUnit = {x = ox, y = oy, z = oz}
-                            end
-                          end
+              for _, otherUnitID in ipairs(unitsInRadius) do
+                if otherUnitID ~= unitID then
+                  local unitTeam = Spring.GetUnitTeam(otherUnitID)
+                  if unitTeam == myTeamID then
+                    local otherDefID = spGetUnitDefID(otherUnitID)
+                    local otherDef = UnitDefs[otherDefID]
+                    -- Must be a combat unit (has weapons, not resbot, not air, not constructor)
+                    if otherDef and 
+                       not isMyResbot(otherUnitID, otherDefID) and 
+                       not otherDef.isAirUnit and 
+                       not otherDef.canRepair and 
+                       otherDef.weapons and #otherDef.weapons > 0 then
+                      
+                      local ox, oy, oz = Spring.GetUnitPosition(otherUnitID)
+                      if ox and oz then
+                        local distSq = (ux - ox)^2 + (uz - oz)^2
+                        if distSq < minDistSq then
+                          minDistSq = distSq
+                          nearestCombatUnit = {x = ox, y = oy, z = oz}
+                          scvlog("Found potential combat unit for idle regroup at distance: " .. math.sqrt(distSq))
                         end
                       end
                     end
                   end
-
-                  -- Only issue move order if we found a valid target and aren't too close
-                  if nearestCombatUnit and minDistSq > 500*500 then
-                    local safeX = nearestCombatUnit.x
-                    local safeZ = nearestCombatUnit.z
-                    local safeY = Spring.GetGroundHeight(safeX, safeZ)
-                    
-                    scvlog("Regrouping isolated unit " .. unitID .. " to combat unit at distance " .. math.sqrt(minDistSq) .. " (idle for " .. timeIdle .. " frames)")
-                    giveScriptOrder(unitID, CMD.MOVE, {safeX, safeY, safeZ}, {})
-                    unitData.taskStatus = "returning_to_friendly"
-                    lastIdleFrame[unitID] = nil  -- Clear idle timer since unit is now tasked
-                  else
-                    scvlog("Unit " .. unitID .. " found combat unit but too close (distance: " .. math.sqrt(minDistSq) .. ")")
-                  end
                 end
+              end
+
+              -- Only issue move order if we found a valid target and aren't too close
+              if nearestCombatUnit and minDistSq > 500*500 then
+                local safeX = nearestCombatUnit.x
+                local safeZ = nearestCombatUnit.z
+                local safeY = Spring.GetGroundHeight(safeX, safeZ)
+                
+                scvlog("Regrouping idle unit " .. unitID .. " to combat unit position")
+                giveScriptOrder(unitID, CMD.MOVE, {safeX, safeY, safeZ}, {})
+                unitData.taskStatus = "returning_to_friendly"
               end
             end
           end
-          -- Don't reset idle timer here - let it accumulate until unit gets a real task
+          -- Only update the last idle frame if we're truly idle
+          if unitData.taskStatus == "idle" then
+            lastIdleFrame[unitID] = last
+          end
         end
       else
         -- Reset idle timer for non-idle units
         lastIdleFrame[unitID] = currentFrame
       end
     end
-  end  -- End of idle regroup interval check
+  end
   
   -- RACE CONDITION FIX: Process all queued units atomically at the end of the frame
   processQueuedUnits()
@@ -1593,14 +1408,7 @@ end
 
 -- ///////////////////////////////////////////  maintainSafeDistanceFromEnemy Function
 function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
-  -- Emergency healers are more aggressive - reduce safety range by 40%
-  local actualAvoidanceRadius = defaultAvoidanceRadius
-  if unitData.taskType == "healing" then
-    actualAvoidanceRadius = defaultAvoidanceRadius * 0.6  -- 40% reduction for healers
-    scvlog("Unit", unitID, "using reduced safety range for healing:", actualAvoidanceRadius, "(was", defaultAvoidanceRadius .. ")")
-  end
-  
-  local nearestEnemy, distance, isAirUnit = findNearestEnemy(unitID, actualAvoidanceRadius)
+  local nearestEnemy, distance, isAirUnit = findNearestEnemy(unitID, defaultAvoidanceRadius)
   
   -- Debug logging to track enemy detection
   if nearestEnemy then
@@ -1610,55 +1418,11 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
     local enemyTeam = Spring.GetUnitTeam(nearestEnemy)
     local myTeam = Spring.GetMyTeamID()
     local isAlly = Spring.AreTeamsAllied(myTeam, enemyTeam)
-    scvlog("Unit", unitID, "detected enemy", nearestEnemy, "at distance", distance, "avoidance radius", actualAvoidanceRadius)
+    scvlog("Unit", unitID, "detected enemy", nearestEnemy, "at distance", distance, "avoidance radius", defaultAvoidanceRadius)
     scvlog("ENEMY DEBUG: Unit " .. nearestEnemy .. " DefID: " .. (enemyDefID or "nil") .. " Name: " .. (enemyDef and enemyDef.name or "unknown") .. " Team: " .. (enemyTeam or "nil") .. " MyTeam: " .. myTeam .. " Allied: " .. tostring(isAlly) .. " Dead: " .. tostring(Spring.GetUnitIsDead(nearestEnemy)))
   end
   
-  if nearestEnemy and distance < actualAvoidanceRadius then
-    -- Check if unit is currently resurrecting - save progress before fleeing
-    if unitData.taskType == "resurrecting" and unitData.featureID then
-      local featureID = unitData.featureID
-      local currentFrame = Spring.GetGameFrame()
-      
-      -- Check if we already have an interrupted resurrection record
-      local interrupted = interruptedResurrections[unitID]
-      if interrupted and interrupted.featureID == featureID then
-        -- Increment attempts for the same feature
-        interrupted.attempts = interrupted.attempts + 1
-        interrupted.startFrame = currentFrame
-        scvlog("Unit", unitID, "interrupting resurrection again - feature", featureID, "attempt", interrupted.attempts)
-      else
-        -- New interruption
-        interruptedResurrections[unitID] = {
-          featureID = featureID,
-          startFrame = currentFrame,
-          attempts = 1
-        }
-        scvlog("Unit", unitID, "interrupting resurrection - feature", featureID, "first attempt")
-      end
-      
-      -- Check attempt limit with temporary unreachable marking
-      if interrupted and interrupted.attempts >= 5 then
-        scvlog("Unit", unitID, "reached 5 resurrection attempts for feature", featureID, "- marking temporarily unreachable")
-        -- Mark as temporarily unreachable using existing system
-        unreachableFeatures[featureID] = currentFrame
-        interruptedResurrections[unitID] = nil  -- Clear the interruption record
-      end
-      
-      -- Clean up active resurrection tracking
-      if activeResurrections[featureID] then
-        for i = #activeResurrections[featureID], 1, -1 do
-          if activeResurrections[featureID][i] == unitID then
-            table.remove(activeResurrections[featureID], i)
-            break
-          end
-        end
-        if #activeResurrections[featureID] == 0 then
-          activeResurrections[featureID] = nil
-        end
-      end
-    end
-    
+  if nearestEnemy and distance < defaultAvoidanceRadius then
     -- We have a close enemy; force the unit to flee
     local ux, uy, uz = Spring.GetUnitPosition(unitID)
     local ex, ey, ez = Spring.GetUnitPosition(nearestEnemy)
@@ -1668,7 +1432,7 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
 
     -- Try to find the nearest combat unit to run toward
     local myTeamID = spGetMyTeamID()
-    local searchRadius = actualAvoidanceRadius * 2
+    local searchRadius = defaultAvoidanceRadius * 2
     local unitsInRadius = Spring.GetUnitsInCylinder(ux, uz, searchRadius)
     local minDistSq = math.huge
     local nearestFriendly = nil
@@ -1716,8 +1480,8 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
       local dx, dz = (ux - ex), (uz - ez)
       local mag = math.sqrt(dx*dx + dz*dz)
       if mag < 1e-6 then mag = 1 end
-      safeX = ux + (dx / mag * actualAvoidanceRadius)
-      safeZ = uz + (dz / mag * actualAvoidanceRadius)
+      safeX = ux + (dx / mag * defaultAvoidanceRadius)
+      safeZ = uz + (dz / mag * defaultAvoidanceRadius)
       safeY = Spring.GetGroundHeight(safeX, safeZ)
     end
 
@@ -1829,12 +1593,6 @@ function findReclaimableFeature(unitID, x, z, searchRadius, needMetal, needEnerg
       -- 1) Check if we already marked this feature unreachable
       -------------------------------------------------------
       if not unreachableFeatures[featureID] then
-          -------------------------------------------------------
-          -- 2) Check if this feature is being actively resurrected
-          -------------------------------------------------------
-          if activeResurrections[featureID] then
-              scvlog("Skipping feature", featureID, "- being resurrected by", #activeResurrections[featureID], "units")
-          else
           local featureDefID = spGetFeatureDefID(featureID)
           if featureDefID then
               local fDef = FeatureDefs[featureDefID]
@@ -1885,7 +1643,6 @@ function findReclaimableFeature(unitID, x, z, searchRadius, needMetal, needEnerg
                   end
               end
           end
-          end  -- End of active resurrection check
       end
   end
 
@@ -1924,22 +1681,13 @@ function performHealing(unitID, unitData)
 
       healingTargets[nearestDamagedUnit] = healingTargets[nearestDamagedUnit] or 0
       
-      -- Emergency healing allows double the normal healer limit for critical units
-      local healerLimit = maxHealersPerUnit
-      if distance < 425 then
-        healerLimit = maxHealersPerUnit * 2  -- Double healers for emergency situations
-        scvlog("Emergency healing situation - allowing", healerLimit, "healers for unit", nearestDamagedUnit, "at distance", distance)
-      end
-      
-      if healingTargets[nearestDamagedUnit] < healerLimit and not healingUnits[unitID] then
+      if healingTargets[nearestDamagedUnit] < maxHealersPerUnit and not healingUnits[unitID] then
           scvlog("Unit", unitID, "is healing unit", nearestDamagedUnit)
           giveScriptOrder(unitID, CMD.REPAIR, {nearestDamagedUnit}, {})
           healingUnits[unitID] = nearestDamagedUnit
           healingTargets[nearestDamagedUnit] = healingTargets[nearestDamagedUnit] + 1
           unitData.taskType = "healing"
           unitData.taskStatus = "in_progress"
-          -- Update dynamic scaling since unit is no longer idle
-          updateDynamicMaxValues()
       else
           scvlog("Healing target already has maximum healers or unit", unitID, "is already assigned to healing")
           unitData.taskStatus = "idle"
@@ -1992,8 +1740,6 @@ function performCollection(unitID, unitData)
       
       unitData.taskType           = "reclaiming"
       unitData.taskStatus         = "in_progress"
-      -- Update dynamic scaling since unit is no longer idle
-      updateDynamicMaxValues()
       return true
   else
       -- CLEANUP: If findReclaimableFeature reserved a slot but the feature is now invalid, clean up the reservation
@@ -2037,18 +1783,18 @@ function performResurrection(unitID, unitData)
                       local currentCount = targetedFeatures[featureID]
                       scvlog("Unit", unitID, "is resurrecting feature", featureID, "- reserved, count:", currentCount)
                       
-                      -- Track active resurrection
-                      activeResurrections[featureID] = activeResurrections[featureID] or {}
-                      table.insert(activeResurrections[featureID], unitID)
-                      
                       giveScriptOrder(unitID, CMD.RESURRECT, {featureID + Game.maxUnits}, {})
                       unitData.featureID = featureID  -- Store the target feature ID
                       unitData.taskType = "resurrecting"
                       unitData.taskStatus = "in_progress"
                       resurrectingUnits[unitID] = true
                       
-                      -- Update dynamic scaling since unit is no longer idle
-                      updateDynamicMaxValues()
+                      -- Debug: Check final count
+                      local finalCount = targetedFeatures[featureID]
+                      scvlog("Feature", featureID, "final resurrection count:", finalCount, "(limit:", maxUnitsPerFeature, ")")
+                      if finalCount > maxUnitsPerFeature then
+                          Spring.Echo("WARNING: Feature " .. featureID .. " exceeded resurrection limit! Has " .. finalCount .. " units (max " .. maxUnitsPerFeature .. ")")
+                      end
                       
                       return  -- Exit after issuing the first valid order
                   else
@@ -2167,9 +1913,6 @@ function widget:UnitIdle(unitID)
     scvlog("Unit", unitID, "is now idle, re-enabling automated behavior")
   end
 
-  -- Update dynamic scaling since we now have a new idle unit
-  updateDynamicMaxValues()
-
   -- Immediately reassign a new task for the unit
   if (unitDef.canReclaim and checkboxes.collecting.state) or
      (unitDef.canResurrect and checkboxes.resurrecting.state) or
@@ -2204,21 +1947,6 @@ function widget:UnitIdle(unitID)
   if resurrectingUnits[unitID] then
     scvlog("Clearing resurrecting unit for UnitID:", unitID)
     resurrectingUnits[unitID] = nil
-    
-    -- Clean up active resurrection tracking
-    if unitData.featureID and activeResurrections[unitData.featureID] then
-      for i = #activeResurrections[unitData.featureID], 1, -1 do
-        if activeResurrections[unitData.featureID][i] == unitID then
-          table.remove(activeResurrections[unitData.featureID], i)
-          scvlog("Removed unit", unitID, "from active resurrection tracking for feature", unitData.featureID)
-          break
-        end
-      end
-      if #activeResurrections[unitData.featureID] == 0 then
-        activeResurrections[unitData.featureID] = nil
-        scvlog("No more units resurrecting feature", unitData.featureID, "- clearing active tracking")
-      end
-    end
   end
   
   -- Process any queued units from UnitIdle
@@ -2398,5 +2126,4 @@ function handleStuckUnits(unitID, unitDef)
       scvlog("Unit is not a Resbot or UnitDef is not valid: UnitID = " .. unitID)
   end
 end
-
 
