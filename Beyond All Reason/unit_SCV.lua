@@ -139,7 +139,7 @@ local function giveScriptOrder(unitID, cmdID, cmdParams, cmdOpts)
   scriptIssuedCommands[cmdKey1] = true
   scriptIssuedCommands[cmdKey2] = true
   
-  Spring.Echo("SCRIPT CMD: Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
+  scvlog("SCRIPT CMD: Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
   scvlog("Tracking script command for unit", unitID, "cmd", cmdID, "at frame", currentFrame)
   
   -- Issue the actual command
@@ -959,7 +959,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
       local unitData = unitsToCollect[unitID]
       if not unitData and isMyResbot(unitID, unitDefID) then
         -- This is a RezBot that exists but wasn't properly registered
-        Spring.Echo("Auto-registering missing RezBot: Unit " .. unitID)
+        scvlog("Auto-registering missing RezBot: Unit " .. unitID)
         unitsToCollect[unitID] = {
           featureCount = 0,
           lastReclaimedFrame = 0,
@@ -1343,7 +1343,7 @@ function maintainSafeDistanceFromEnemy(unitID, unitData, defaultAvoidanceRadius)
     local myTeam = Spring.GetMyTeamID()
     local isAlly = Spring.AreTeamsAllied(myTeam, enemyTeam)
     scvlog("Unit", unitID, "detected enemy", nearestEnemy, "at distance", distance, "avoidance radius", defaultAvoidanceRadius)
-    Spring.Echo("ENEMY DEBUG: Unit " .. nearestEnemy .. " DefID: " .. (enemyDefID or "nil") .. " Name: " .. (enemyDef and enemyDef.name or "unknown") .. " Team: " .. (enemyTeam or "nil") .. " MyTeam: " .. myTeam .. " Allied: " .. tostring(isAlly) .. " Dead: " .. tostring(Spring.GetUnitIsDead(nearestEnemy)))
+    scvlog("ENEMY DEBUG: Unit " .. nearestEnemy .. " DefID: " .. (enemyDefID or "nil") .. " Name: " .. (enemyDef and enemyDef.name or "unknown") .. " Team: " .. (enemyTeam or "nil") .. " MyTeam: " .. myTeam .. " Allied: " .. tostring(isAlly) .. " Dead: " .. tostring(Spring.GetUnitIsDead(nearestEnemy)))
   end
   
   if nearestEnemy and distance < defaultAvoidanceRadius then
