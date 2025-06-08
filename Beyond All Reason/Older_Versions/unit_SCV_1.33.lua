@@ -6,7 +6,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.34",
+    version   = "v1.33",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -38,7 +38,6 @@ local manuallyCommandedUnits = {}  -- Track units that have been manually comman
 local lastProgressCheck = {}  -- Track when units last made progress toward their targets
 local lastStuckCheck = {}  -- Track when each unit was last checked for being stuck
 local scriptIssuedCommands = {}  -- Track commands issued by the script itself
-local pendingProcessUnits = {}  -- Queue for units that need processing to prevent race conditions
 local UNREACHABLE_EXPIRE_FRAMES = 3000  -- Number of frames to keep marking something as unreachable (e.g., ~2 min)
 local maxUnitsPerFeature = 4  -- Maximum units allowed to target the same feature
 local maxHealersPerUnit = 4  -- Maximum number of healers per unit
@@ -890,29 +889,6 @@ end
 
 
 
--- /////////////////////////////////////////// Centralized Processing System
--- Queue units for processing to prevent race conditions
-function queueUnitForProcessing(unitID, unitData)
-  if unitData then
-    pendingProcessUnits[unitID] = unitData
-    scvlog("Queued unit", unitID, "for processing")
-  end
-end
-
--- Process all queued units atomically to prevent race conditions
-function processQueuedUnits()
-  if next(pendingProcessUnits) then
-    local unitsToProcess = {}
-    for unitID, unitData in pairs(pendingProcessUnits) do
-      unitsToProcess[unitID] = unitData
-    end
-    pendingProcessUnits = {}  -- Clear the queue
-    
-    scvlog("Processing", table.getn(unitsToProcess) or 0, "queued units atomically")
-    processUnits(unitsToProcess)
-  end
-end
-
 -- /////////////////////////////////////////// processUnits Function (Updated)
 -- 
 -- 
@@ -1033,11 +1009,8 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
       lastReclaimedFrame = 0,
       taskStatus = "idle"  -- Set the task status to "idle" when the unit is created
     }
-    queueUnitForProcessing(unitID, unitsToCollect[unitID])
+    processUnits({[unitID] = unitsToCollect[unitID]})
   end
-  
-  -- Process queued units immediately for newly created units
-  processQueuedUnits()
 end
 
 -- Handle resurrected units (they trigger UnitFinished, not always UnitCreated)
@@ -1053,9 +1026,7 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
         lastReclaimedFrame = 0,
         taskStatus = "idle"
       }
-      queueUnitForProcessing(unitID, unitsToCollect[unitID])
-      -- Process queued units immediately for resurrected units  
-      processQueuedUnits()
+      processUnits({[unitID] = unitsToCollect[unitID]})
     else
       -- Unit already exists (normal build process), just ensure proper state
       scvlog("Resbot finished normally: UnitID = " .. unitID)
@@ -1135,36 +1106,19 @@ function widget:FeatureDestroyed(featureID, allyTeam)
   end
   
   scvlog("Feature destroyed: FeatureID = " .. featureID)
-  
-  -- Find ALL units that were targeting this specific feature
-  local affectedUnits = {}
   for unitID, data in pairs(unitsToCollect) do
     local unitDefID = spGetUnitDefID(unitID)
     if isMyResbot(unitID, unitDefID) then  -- Use isMyResbot to check if the unit is a Resbot
       if data.featureID == featureID then
-        -- Clear the destroyed feature assignment
         data.featureID = nil
         data.lastReclaimedFrame = Spring.GetGameFrame()
-        data.taskStatus = "idle"  -- reset the unit to idle after feature destroyed
-        affectedUnits[unitID] = data
-        scvlog("Unit", unitID, "was targeting destroyed feature", featureID, "- marked for reprocessing")
+        data.taskStatus = "idle"  -- reset the unit to idle after unit destroyed.
+        processUnits(unitsToCollect)
+        break
       end
     end
   end
-  
-  -- Queue only the units that were actually affected by this feature destruction
-  if next(affectedUnits) then
-    scvlog("Queueing", table.getn(affectedUnits) or 0, "units affected by feature", featureID, "destruction")
-    for unitID, data in pairs(affectedUnits) do
-      queueUnitForProcessing(unitID, data)
-    end
-  else
-    scvlog("No units were targeting destroyed feature", featureID)
-  end
   targetedFeatures[featureID] = nil  -- Clear the target as the feature is destroyed
-  
-  -- Process any queued units from feature destruction
-  processQueuedUnits()
 end
 
 
@@ -1194,7 +1148,7 @@ function widget:GameFrame(currentFrame)
             ----------------------------------------------------------------------
             if (not isFleeing) and 
                (unitData.taskStatus == "idle" or unitData.taskStatus == "completed") then
-              queueUnitForProcessing(unitID, unitData)
+              processUnits({ [unitID] = unitData })
             end
           else
             scvlog("Skipping automated logic for manually commanded unit", unitID)
@@ -1228,7 +1182,7 @@ function widget:GameFrame(currentFrame)
           -- But only if not manually commanded
           if (unitData.taskStatus == "idle" or unitData.taskStatus == "completed") and 
              not manuallyCommandedUnits[unitID] then
-            queueUnitForProcessing(unitID, unitData)
+            processUnits({ [unitID] = unitData })
           end
         end
       end
@@ -1314,9 +1268,6 @@ function widget:GameFrame(currentFrame)
       end
     end
   end
-  
-  -- RACE CONDITION FIX: Process all queued units atomically at the end of the frame
-  processQueuedUnits()
 end
 
 
@@ -1646,7 +1597,7 @@ function findReclaimableFeature(unitID, x, z, searchRadius, needMetal, needEnerg
       end
   end
 
-  -- Second pass: find the best feature among the nearest ones and IMMEDIATELY reserve it
+  -- Second pass: find the best feature among the nearest ones
   for _, feat in ipairs(nearestFeatures) do
       local alreadyTargetedCount = targetedFeatures[feat.id] or 0
       if alreadyTargetedCount < maxUnitsPerFeature then
@@ -1656,12 +1607,6 @@ function findReclaimableFeature(unitID, x, z, searchRadius, needMetal, needEnerg
               bestFeature = feat.id
           end
       end
-  end
-
-  -- RACE CONDITION FIX: Reserve the slot immediately before returning
-  if bestFeature then
-      targetedFeatures[bestFeature] = (targetedFeatures[bestFeature] or 0) + 1
-      scvlog("RESERVED: Feature", bestFeature, "now reserved by unit", unitID, "- count:", targetedFeatures[bestFeature])
   end
 
   return bestFeature
@@ -1721,35 +1666,16 @@ function performCollection(unitID, unitData)
   local featureID = findReclaimableFeature(unitID, x, z, reclaimRadius, needMetal, needEnergy)
 
   if featureID and Spring.ValidFeatureID(featureID) then
-      -- Feature was already reserved in findReclaimableFeature - no need to increment again
-      local currentCount = targetedFeatures[featureID] or 0
-      scvlog("Unit", unitID, "is reclaiming feature", featureID, "- already reserved, count:", currentCount)
-      
+      scvlog("Unit", unitID, "is reclaiming feature", featureID)
       giveScriptOrder(unitID, CMD.RECLAIM, {featureID + Game.maxUnits}, {})
       unitData.featureCount       = 1
       unitData.lastReclaimedFrame = Spring.GetGameFrame()
       unitData.featureID          = featureID  -- Store the target feature ID
-      -- targetedFeatures[featureID] increment removed - already done in findReclaimableFeature
-      
-      -- Debug: Check count after assignment (should be same as currentCount)
-      local finalCount = targetedFeatures[featureID]
-      scvlog("Feature", featureID, "final assignment count:", finalCount, "(limit:", maxUnitsPerFeature, ")")
-      if finalCount > maxUnitsPerFeature then
-          Spring.Echo("WARNING: Feature " .. featureID .. " exceeded limit! Has " .. finalCount .. " units (max " .. maxUnitsPerFeature .. ")")
-      end
-      
+      targetedFeatures[featureID] = (targetedFeatures[featureID] or 0) + 1
       unitData.taskType           = "reclaiming"
       unitData.taskStatus         = "in_progress"
       return true
   else
-      -- CLEANUP: If findReclaimableFeature reserved a slot but the feature is now invalid, clean up the reservation
-      if featureID then
-          scvlog("Feature", featureID, "was reserved but is now invalid, cleaning up reservation")
-          targetedFeatures[featureID] = (targetedFeatures[featureID] or 0) - 1
-          if targetedFeatures[featureID] <= 0 then
-              targetedFeatures[featureID] = nil
-          end
-      end
       scvlog("No valid feature found (or needed) for collection by unit", unitID)
   end
 
@@ -1778,24 +1704,14 @@ function performResurrection(unitID, unitData)
           if not (checkboxes.excludeBuildings.state and isBuilding(featureID)) then
               if feature.customParams["category"] == "corpses" then
                   if Spring.ValidFeatureID(featureID) and (not targetedFeatures[featureID] or targetedFeatures[featureID] < maxUnitsPerFeature) then
-                      -- RACE CONDITION FIX: Reserve the slot immediately
-                      targetedFeatures[featureID] = (targetedFeatures[featureID] or 0) + 1
-                      local currentCount = targetedFeatures[featureID]
-                      scvlog("Unit", unitID, "is resurrecting feature", featureID, "- reserved, count:", currentCount)
-                      
+                      scvlog("Unit", unitID, "is resurrecting feature", featureID)
                       giveScriptOrder(unitID, CMD.RESURRECT, {featureID + Game.maxUnits}, {})
                       unitData.featureID = featureID  -- Store the target feature ID
                       unitData.taskType = "resurrecting"
                       unitData.taskStatus = "in_progress"
                       resurrectingUnits[unitID] = true
                       
-                      -- Debug: Check final count
-                      local finalCount = targetedFeatures[featureID]
-                      scvlog("Feature", featureID, "final resurrection count:", finalCount, "(limit:", maxUnitsPerFeature, ")")
-                      if finalCount > maxUnitsPerFeature then
-                          Spring.Echo("WARNING: Feature " .. featureID .. " exceeded resurrection limit! Has " .. finalCount .. " units (max " .. maxUnitsPerFeature .. ")")
-                      end
-                      
+                      targetedFeatures[featureID] = (targetedFeatures[featureID] or 0) + 1
                       return  -- Exit after issuing the first valid order
                   else
                       scvlog("Feature", featureID, "is already targeted by maximum units or not valid")
@@ -1918,20 +1834,17 @@ function widget:UnitIdle(unitID)
      (unitDef.canResurrect and checkboxes.resurrecting.state) or
      (unitDef.canRepair and checkboxes.healing.state) then
     scvlog("Re-queueing UnitID for tasks:", unitID)
-    queueUnitForProcessing(unitID, unitData)
+    processUnits({[unitID] = unitData})
   end
 
-  -- Clear any lingering target associations ONLY if the unit is truly going idle
-  -- Don't clean up if the unit was just assigned a task (taskStatus = "in_progress")
-  if unitData.featureID and unitData.taskStatus ~= "in_progress" then
+  -- Clear any lingering target associations
+  if unitData.featureID then
     scvlog("Handling targeted feature for UnitID:", unitID, "featureID:", unitData.featureID)
     targetedFeatures[unitData.featureID] = (targetedFeatures[unitData.featureID] or 0) - 1
     if targetedFeatures[unitData.featureID] <= 0 then
       targetedFeatures[unitData.featureID] = nil
     end
     unitData.featureID = nil
-  elseif unitData.featureID and unitData.taskStatus == "in_progress" then
-    scvlog("Unit", unitID, "has active assignment to feature", unitData.featureID, "- not cleaning up")
   end
 
   if healingUnits[unitID] then
@@ -1948,9 +1861,6 @@ function widget:UnitIdle(unitID)
     scvlog("Clearing resurrecting unit for UnitID:", unitID)
     resurrectingUnits[unitID] = nil
   end
-  
-  -- Process any queued units from UnitIdle
-  processQueuedUnits()
 end
 
 
@@ -2114,10 +2024,8 @@ function handleStuckUnits(unitID, unitDef)
               featureID          = nil
           }
 
-          -- Queue the unit for processing to pick a new task
-          queueUnitForProcessing(unitID, unitsToCollect[unitID])
-          -- Process queued units immediately for stuck units
-          processQueuedUnits()
+          -- Re-run processUnits on that single unit to pick a new task
+          processUnits({[unitID] = unitsToCollect[unitID]})
 
       else
           scvlog("Unit is not stuck: UnitID = " .. unitID)
