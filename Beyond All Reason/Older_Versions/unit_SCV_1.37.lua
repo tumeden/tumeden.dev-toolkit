@@ -1,3 +1,4 @@
+-- // This is still work in progress.
 -- /////////////////////////////////////////// Legion supported
 function widget:GetInfo()
   return {
@@ -5,7 +6,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.38",
+    version   = "v1.37",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -78,12 +79,12 @@ local CMD_RECLAIM = CMD.RECLAIM
 -- Debug: Log command IDs on startup
 local function logCommandIDs()
   if isLoggingEnabled then
-    scvlog("Command ID mappings:")
-    scvlog("  CMD.MOVE =", CMD.MOVE)
-    scvlog("  CMD.RESURRECT =", CMD.RESURRECT) 
-    scvlog("  CMD.RECLAIM =", CMD.RECLAIM)
-    scvlog("  CMD.REPAIR =", CMD.REPAIR)
-    scvlog("  CMD.STOP =", CMD.STOP)
+    Spring.Echo("Command ID mappings:")
+    Spring.Echo("  CMD.MOVE =", CMD.MOVE)
+    Spring.Echo("  CMD.RESURRECT =", CMD.RESURRECT) 
+    Spring.Echo("  CMD.RECLAIM =", CMD.RECLAIM)
+    Spring.Echo("  CMD.REPAIR =", CMD.REPAIR)
+    Spring.Echo("  CMD.STOP =", CMD.STOP)
   end
 end
 
@@ -248,7 +249,7 @@ function widget:Initialize()
         if UnitDefNames.legrezbot then legRezbotDefID = UnitDefNames.legrezbot.id end
 
         if not (armRectrDefID or corNecroDefID or legRezbotDefID) then
-            scvlog("No supported RezBot UnitDefIDs could be determined")
+            Spring.Echo("No supported RezBot UnitDefIDs could be determined")
             widgetHandler:RemoveWidget()
             return
         end
@@ -261,7 +262,7 @@ function widget:Initialize()
             commanderNames.legcom = nil
         end
     else
-        scvlog("UnitDefNames table not found")
+        Spring.Echo("UnitDefNames table not found")
         widgetHandler:RemoveWidget()
         return
     end
@@ -1105,21 +1106,21 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
         -- Don't flag this as manual - it's just an untracked unit getting commands
         scvlog("Unit", unitID, "was auto-registered, treating command as normal behavior")
       else
-              -- This is a legitimate manual command
-      scvlog("=== MANUAL COMMAND DETECTED ===")
-      scvlog("Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
-      scvlog("Unit is RezBot: " .. tostring(isMyResbot(unitID, unitDefID)))
-      if unitData then
-        scvlog("Unit task status: " .. (unitData.taskStatus or "nil"))
-                scvlog("Unit feature target: " .. (unitData.featureID or "nil"))
+        -- This is a legitimate manual command
+        Spring.Echo("=== MANUAL COMMAND DETECTED ===")
+        Spring.Echo("Unit " .. unitID .. " cmd " .. cmdID .. " frame " .. currentFrame)
+        Spring.Echo("Unit is RezBot: " .. tostring(isMyResbot(unitID, unitDefID)))
+        if unitData then
+          Spring.Echo("Unit task status: " .. (unitData.taskStatus or "nil"))
+                  Spring.Echo("Unit feature target: " .. (unitData.featureID or "nil"))
       else
-        scvlog("Unit not in unitsToCollect table")
+        Spring.Echo("Unit not in unitsToCollect table")
       end
-      scvlog("Available tracked commands:")
+      Spring.Echo("Available tracked commands:")
       for key, _ in pairs(scriptIssuedCommands) do
-        scvlog("  " .. key)
+        Spring.Echo("  " .. key)
       end
-      scvlog("=== END DEBUG ===")
+      Spring.Echo("=== END DEBUG ===")
       
       -- Mark this command as processed to prevent duplicate detection
       processedManualCommands[manualKey] = true
@@ -1986,7 +1987,7 @@ function performCollection(unitID, unitData)
       local finalCount = targetedFeatures[featureID]
       scvlog("Feature", featureID, "final assignment count:", finalCount, "(limit:", maxUnitsPerFeature, ")")
       if finalCount > maxUnitsPerFeature then
-          scvlog("WARNING: Feature " .. featureID .. " exceeded limit! Has " .. finalCount .. " units (max " .. maxUnitsPerFeature .. ")")
+          Spring.Echo("WARNING: Feature " .. featureID .. " exceeded limit! Has " .. finalCount .. " units (max " .. maxUnitsPerFeature .. ")")
       end
       
       unitData.taskType           = "reclaiming"
