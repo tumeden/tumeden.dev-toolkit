@@ -5,7 +5,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.40",
+    version   = "v1.38",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -75,24 +75,15 @@ local CMD_MOVE = CMD.MOVE
 local CMD_RESURRECT = CMD.RESURRECT
 local CMD_RECLAIM = CMD.RECLAIM
 
--- /////////////////////////////////////////// scvlog Function
--- CTRL + L to enable Logging
--- This is for development purposes.
-local function scvlog(...)
-  if isLoggingEnabled then
-      Spring.Echo(...)
-  end
-end
-
 -- Debug: Log command IDs on startup
 local function logCommandIDs()
   if isLoggingEnabled then
     scvlog("Command ID mappings:")
-    scvlog("  CMD.MOVE =", tostring(CMD.MOVE))
-    scvlog("  CMD.RESURRECT =", tostring(CMD.RESURRECT))
-    scvlog("  CMD.RECLAIM =", tostring(CMD.RECLAIM))
-    scvlog("  CMD.REPAIR =", tostring(CMD.REPAIR))
-    scvlog("  CMD.STOP =", tostring(CMD.STOP))
+    scvlog("  CMD.MOVE =", CMD.MOVE)
+    scvlog("  CMD.RESURRECT =", CMD.RESURRECT) 
+    scvlog("  CMD.RECLAIM =", CMD.RECLAIM)
+    scvlog("  CMD.REPAIR =", CMD.REPAIR)
+    scvlog("  CMD.STOP =", CMD.STOP)
   end
 end
 
@@ -122,6 +113,15 @@ local getFeatureResources = getFeatureResources
 local glVertex = gl.Vertex
 local glBeginEnd = gl.BeginEnd
 
+
+-- /////////////////////////////////////////// scvlog Function
+-- CTRL + L to enable Logging
+-- This is for development purposes.
+local function scvlog(...)
+  if isLoggingEnabled then
+      Spring.Echo(...)
+  end
+end
 
 -- /////////////////////////////////////////// Script Command Wrapper
 -- Use this instead of Spring.GiveOrderToUnit to track script-issued commands
@@ -962,99 +962,72 @@ function processUnits(units)
   for unitID, unitData in pairs(units) do
     local unitDefID = spGetUnitDefID(unitID)
     if isMyResbot(unitID, unitDefID) then
-      repeat
-        -- Opportunistic reclaim of live enemy non-combatant buildings (if engine allows)
-        -- Only if within 1/10th of reclaim range
-        local x, y, z = spGetUnitPosition(unitID)
-        local closeRadius = reclaimRadius * 0.25
-        local enemyUnits = Spring.GetUnitsInCylinder(x, z, closeRadius, Spring.ENEMY_UNITS)
-        for _, enemyID in ipairs(enemyUnits) do
-          if Spring.ValidUnitID(enemyID) and not Spring.GetUnitIsDead(enemyID) then
-            local enemyDefID = spGetUnitDefID(enemyID)
-            local enemyDef = UnitDefs[enemyDefID]
-            if enemyDef and isBuilding(enemyID) and (not enemyDef.weapons or #enemyDef.weapons == 0) then
-              -- Check if this RezBot can reclaim live enemy units (engine property)
-              if enemyDef.reclaimable or (UnitDefs[unitDefID] and UnitDefs[unitDefID].canReclaimEnemy) then
-                scvlog("Opportunistically reclaiming live enemy building:", enemyID, "at distance", closeRadius)
-                giveScriptOrder(unitID, CMD.RECLAIM, {enemyID}, {})
-                unitData.taskType = "reclaiming_enemy_building"
-                unitData.taskStatus = "in_progress"
-                -- Only reclaim one at a time
-                break
-              end
-            end
-          end
-        end
-        -- If we issued a reclaim above, skip normal logic for this unit
-        if unitData.taskType == "reclaiming_enemy_building" and unitData.taskStatus == "in_progress" then
-          break
-        end
 
-        -- 1) HIGHEST PRIORITY: Emergency healing for critically close units (<425 distance)
-        if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
-          local nearestDamagedUnit, distance = findNearestDamagedFriendly(unitID, healResurrectRadius)
-          if nearestDamagedUnit and distance < 425 then
-            scvlog("Unit", unitID, "performing emergency healing - damaged unit at", distance, "distance")
-            performHealing(unitID, unitData)
-          end
-        end
-
-        -- 2) SECOND PRIORITY: Resume interrupted resurrections
-        if interruptedResurrections[unitID] and unitData.taskStatus ~= "in_progress" then
-          local interrupted = interruptedResurrections[unitID]
-          if Spring.ValidFeatureID(interrupted.featureID) then
-            local featureDef = FeatureDefs[Spring.GetFeatureDefID(interrupted.featureID)]
-            if featureDef and featureDef.resurrectable then
-              -- Check if feature is still available (not at unit limit)
-              local currentTargets = targetedFeatures[interrupted.featureID] or 0
-              if currentTargets < maxUnitsPerFeature then
-                scvlog("Unit", unitID, "resuming interrupted resurrection of feature", interrupted.featureID, "(attempt", interrupted.attempts .. ")")
-                
-                -- Reserve the feature
-                targetedFeatures[interrupted.featureID] = currentTargets + 1
-                
-                -- Track active resurrection
-                activeResurrections[interrupted.featureID] = activeResurrections[interrupted.featureID] or {}
-                table.insert(activeResurrections[interrupted.featureID], unitID)
-                
-                -- Clear the interruption and resume
-                interruptedResurrections[unitID] = nil
-                giveScriptOrder(unitID, CMD.RESURRECT, {interrupted.featureID + Game.maxUnits}, {})
-                unitData.featureID = interrupted.featureID
-                unitData.taskType = "resurrecting"
-                unitData.taskStatus = "in_progress"
-                resurrectingUnits[unitID] = true
-                
-                -- Update dynamic scaling since unit is no longer idle
-                updateDynamicMaxValues()
-                
-                break  -- Exit after issuing the first valid order for this unit
-              else
-                scvlog("Unit", unitID, "cannot resume resurrection - feature", interrupted.featureID, "at unit limit")
-              end
-            end
-          end
-          
-          -- Feature no longer exists/resurrectable or at limit
-          scvlog("Unit", unitID, "abandoning interrupted resurrection - feature no longer valid/available")
-          interruptedResurrections[unitID] = nil
-        end
-
-        -- 3) Resurrecting Logic
-        if checkboxes.resurrecting.state and unitData.taskStatus ~= "in_progress" then
-          performResurrection(unitID, unitData)
-        end
-
-        -- 4) Collecting Logic
-        if checkboxes.collecting.state and unitData.taskStatus ~= "in_progress" then
-          performCollection(unitID, unitData)
-        end
-
-        -- 5) Healing Logic (all other damaged units not covered by emergency healing)
-        if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
+      -- 1) HIGHEST PRIORITY: Emergency healing for critically close units (<425 distance)
+      if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
+        local nearestDamagedUnit, distance = findNearestDamagedFriendly(unitID, healResurrectRadius)
+        if nearestDamagedUnit and distance < 425 then
+          scvlog("Unit", unitID, "performing emergency healing - damaged unit at", distance, "distance")
           performHealing(unitID, unitData)
         end
-      until true
+      end
+
+      -- 2) SECOND PRIORITY: Resume interrupted resurrections
+      if interruptedResurrections[unitID] and unitData.taskStatus ~= "in_progress" then
+        local interrupted = interruptedResurrections[unitID]
+        if Spring.ValidFeatureID(interrupted.featureID) then
+          local featureDef = FeatureDefs[Spring.GetFeatureDefID(interrupted.featureID)]
+          if featureDef and featureDef.resurrectable then
+            -- Check if feature is still available (not at unit limit)
+            local currentTargets = targetedFeatures[interrupted.featureID] or 0
+            if currentTargets < maxUnitsPerFeature then
+              scvlog("Unit", unitID, "resuming interrupted resurrection of feature", interrupted.featureID, "(attempt", interrupted.attempts .. ")")
+              
+              -- Reserve the feature
+              targetedFeatures[interrupted.featureID] = currentTargets + 1
+              
+              -- Track active resurrection
+              activeResurrections[interrupted.featureID] = activeResurrections[interrupted.featureID] or {}
+              table.insert(activeResurrections[interrupted.featureID], unitID)
+              
+              -- Clear the interruption and resume
+              interruptedResurrections[unitID] = nil
+              giveScriptOrder(unitID, CMD.RESURRECT, {interrupted.featureID + Game.maxUnits}, {})
+              unitData.featureID = interrupted.featureID
+              unitData.taskType = "resurrecting"
+              unitData.taskStatus = "in_progress"
+              resurrectingUnits[unitID] = true
+              
+              -- Update dynamic scaling since unit is no longer idle
+              updateDynamicMaxValues()
+              
+              return  -- Exit after issuing the first valid order
+            else
+              scvlog("Unit", unitID, "cannot resume resurrection - feature", interrupted.featureID, "at unit limit")
+            end
+          end
+        end
+        
+        -- Feature no longer exists/resurrectable or at limit
+        scvlog("Unit", unitID, "abandoning interrupted resurrection - feature no longer valid/available")
+        interruptedResurrections[unitID] = nil
+      end
+
+      -- 3) Resurrecting Logic
+      if checkboxes.resurrecting.state and unitData.taskStatus ~= "in_progress" then
+        performResurrection(unitID, unitData)
+      end
+
+      -- 4) Collecting Logic
+      if checkboxes.collecting.state and unitData.taskStatus ~= "in_progress" then
+        performCollection(unitID, unitData)
+      end
+
+      -- 5) Healing Logic (all other damaged units not covered by emergency healing)
+      if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
+        performHealing(unitID, unitData)
+      end
+
       -- If any of the steps set unitData.taskStatus = "in_progress",
       -- we skip further steps for that unit (due to the checks above),
       -- but we continue on to the next unit in the loop.
@@ -2268,11 +2241,6 @@ function isUnitStuck(unitID)
   lastStuckCheck[unitID] = currentFrame
 
   local minMoveDistance = 0.8  -- Further reduced for even more sensitive detection
-  local minProgressThreshold = 12.0  -- Require at least 12 units of progress to reset stuck counter (more aggressive)
-  local stuckDistanceWindow = 10.0  -- If within 10 units of last distance for too long, consider stuck
-  local oscillationWindow = 0.5     -- Oscillation window reduced to 0.5 units
-  local maxOscillateCount = 2       -- Only allow 2 oscillations before marking as stuck
-  local maxTotalStuckFrames = 300   -- 10 seconds max stuck time regardless of progress
   local x, y, z = spGetUnitPosition(unitID)
   local lastPos = unitLastPosition[unitID] or {x = x, y = y, z = z}
   local distanceMoved = math.sqrt((lastPos.x - x)^2 + (lastPos.z - z)^2)
@@ -2299,43 +2267,28 @@ function isUnitStuck(unitID)
                   lastProgressCheck[unitID] = {
                       lastDistance = targetDistance or 9999,
                       lastFrame = currentFrame,
-                      stuckFrames = 0,
-                      oscillateCount = 0,
-                      totalStuckFrames = 0
+                      stuckFrames = 0
                   }
               else
-                  -- Check if we're making significant progress toward target
+                  -- Check if we're making progress toward target
                   local madeProgress = false
                   if targetDistance and progressData.lastDistance then
-                      madeProgress = (progressData.lastDistance - targetDistance) > minProgressThreshold
+                      madeProgress = (progressData.lastDistance - targetDistance) > 0.5
                   end
-                  -- Check for oscillation (distance not improving by more than oscillationWindow)
-                  local oscillating = false
-                  if targetDistance and progressData.lastDistance then
-                      oscillating = math.abs(progressData.lastDistance - targetDistance) < oscillationWindow
-                  end
+                  
                   if madeProgress or distanceMoved > 1.0 then
-                      -- Reset stuck counter if making significant progress
+                      -- Reset stuck counter if making progress
                       progressData.stuckFrames = 0
                       progressData.lastDistance = targetDistance
                       progressData.lastFrame = currentFrame
-                      progressData.oscillateCount = 0
-                      progressData.totalStuckFrames = 0
                   else
                       -- Increment stuck counter
-                      local frameDelta = (currentFrame - progressData.lastFrame)
-                      progressData.stuckFrames = progressData.stuckFrames + frameDelta
-                      progressData.totalStuckFrames = (progressData.totalStuckFrames or 0) + frameDelta
+                      progressData.stuckFrames = progressData.stuckFrames + (currentFrame - progressData.lastFrame)
                       progressData.lastFrame = currentFrame
-                      -- Increment oscillation counter if not making progress
-                      if oscillating then
-                          progressData.oscillateCount = (progressData.oscillateCount or 0) + 1
-                      else
-                          progressData.oscillateCount = 0
-                      end
-                      -- If stuck for more than 3 seconds (90 frames), or oscillating for 2+ checks, or total stuck time exceeds 10 seconds, consider it unreachable
-                      if progressData.stuckFrames > 90 or (progressData.oscillateCount and progressData.oscillateCount >= maxOscillateCount) or (progressData.totalStuckFrames and progressData.totalStuckFrames > maxTotalStuckFrames) then
-                          scvlog("Unit", unitID, "hasn't made significant progress for", progressData.stuckFrames, "frames (oscillateCount:", progressData.oscillateCount, ", totalStuck:", progressData.totalStuckFrames, ") - unreachable target")
+                      
+                      -- If stuck for more than 3 seconds (90 frames), consider it unreachable
+                      if progressData.stuckFrames > 90 then
+                          scvlog("Unit", unitID, "hasn't made progress for", progressData.stuckFrames, "frames - unreachable target")
                           unitLastPosition[unitID] = {x = x, y = y, z = z}
                           lastProgressCheck[unitID] = nil  -- Reset
                           return true

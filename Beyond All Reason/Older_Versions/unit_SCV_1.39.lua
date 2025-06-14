@@ -5,7 +5,7 @@ function widget:GetInfo()
     desc      = "RezBots Resurrect, Collect resources, and heal injured units. alt+v to open UI",
     author    = "Tumeden",
     date      = "2025",
-    version   = "v1.40",
+    version   = "v1.39",
     license   = "GNU GPL, v2 or later",
     layer     = 0,
     enabled   = true
@@ -962,99 +962,72 @@ function processUnits(units)
   for unitID, unitData in pairs(units) do
     local unitDefID = spGetUnitDefID(unitID)
     if isMyResbot(unitID, unitDefID) then
-      repeat
-        -- Opportunistic reclaim of live enemy non-combatant buildings (if engine allows)
-        -- Only if within 1/10th of reclaim range
-        local x, y, z = spGetUnitPosition(unitID)
-        local closeRadius = reclaimRadius * 0.25
-        local enemyUnits = Spring.GetUnitsInCylinder(x, z, closeRadius, Spring.ENEMY_UNITS)
-        for _, enemyID in ipairs(enemyUnits) do
-          if Spring.ValidUnitID(enemyID) and not Spring.GetUnitIsDead(enemyID) then
-            local enemyDefID = spGetUnitDefID(enemyID)
-            local enemyDef = UnitDefs[enemyDefID]
-            if enemyDef and isBuilding(enemyID) and (not enemyDef.weapons or #enemyDef.weapons == 0) then
-              -- Check if this RezBot can reclaim live enemy units (engine property)
-              if enemyDef.reclaimable or (UnitDefs[unitDefID] and UnitDefs[unitDefID].canReclaimEnemy) then
-                scvlog("Opportunistically reclaiming live enemy building:", enemyID, "at distance", closeRadius)
-                giveScriptOrder(unitID, CMD.RECLAIM, {enemyID}, {})
-                unitData.taskType = "reclaiming_enemy_building"
-                unitData.taskStatus = "in_progress"
-                -- Only reclaim one at a time
-                break
-              end
-            end
-          end
-        end
-        -- If we issued a reclaim above, skip normal logic for this unit
-        if unitData.taskType == "reclaiming_enemy_building" and unitData.taskStatus == "in_progress" then
-          break
-        end
 
-        -- 1) HIGHEST PRIORITY: Emergency healing for critically close units (<425 distance)
-        if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
-          local nearestDamagedUnit, distance = findNearestDamagedFriendly(unitID, healResurrectRadius)
-          if nearestDamagedUnit and distance < 425 then
-            scvlog("Unit", unitID, "performing emergency healing - damaged unit at", distance, "distance")
-            performHealing(unitID, unitData)
-          end
-        end
-
-        -- 2) SECOND PRIORITY: Resume interrupted resurrections
-        if interruptedResurrections[unitID] and unitData.taskStatus ~= "in_progress" then
-          local interrupted = interruptedResurrections[unitID]
-          if Spring.ValidFeatureID(interrupted.featureID) then
-            local featureDef = FeatureDefs[Spring.GetFeatureDefID(interrupted.featureID)]
-            if featureDef and featureDef.resurrectable then
-              -- Check if feature is still available (not at unit limit)
-              local currentTargets = targetedFeatures[interrupted.featureID] or 0
-              if currentTargets < maxUnitsPerFeature then
-                scvlog("Unit", unitID, "resuming interrupted resurrection of feature", interrupted.featureID, "(attempt", interrupted.attempts .. ")")
-                
-                -- Reserve the feature
-                targetedFeatures[interrupted.featureID] = currentTargets + 1
-                
-                -- Track active resurrection
-                activeResurrections[interrupted.featureID] = activeResurrections[interrupted.featureID] or {}
-                table.insert(activeResurrections[interrupted.featureID], unitID)
-                
-                -- Clear the interruption and resume
-                interruptedResurrections[unitID] = nil
-                giveScriptOrder(unitID, CMD.RESURRECT, {interrupted.featureID + Game.maxUnits}, {})
-                unitData.featureID = interrupted.featureID
-                unitData.taskType = "resurrecting"
-                unitData.taskStatus = "in_progress"
-                resurrectingUnits[unitID] = true
-                
-                -- Update dynamic scaling since unit is no longer idle
-                updateDynamicMaxValues()
-                
-                break  -- Exit after issuing the first valid order for this unit
-              else
-                scvlog("Unit", unitID, "cannot resume resurrection - feature", interrupted.featureID, "at unit limit")
-              end
-            end
-          end
-          
-          -- Feature no longer exists/resurrectable or at limit
-          scvlog("Unit", unitID, "abandoning interrupted resurrection - feature no longer valid/available")
-          interruptedResurrections[unitID] = nil
-        end
-
-        -- 3) Resurrecting Logic
-        if checkboxes.resurrecting.state and unitData.taskStatus ~= "in_progress" then
-          performResurrection(unitID, unitData)
-        end
-
-        -- 4) Collecting Logic
-        if checkboxes.collecting.state and unitData.taskStatus ~= "in_progress" then
-          performCollection(unitID, unitData)
-        end
-
-        -- 5) Healing Logic (all other damaged units not covered by emergency healing)
-        if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
+      -- 1) HIGHEST PRIORITY: Emergency healing for critically close units (<425 distance)
+      if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
+        local nearestDamagedUnit, distance = findNearestDamagedFriendly(unitID, healResurrectRadius)
+        if nearestDamagedUnit and distance < 425 then
+          scvlog("Unit", unitID, "performing emergency healing - damaged unit at", distance, "distance")
           performHealing(unitID, unitData)
         end
-      until true
+      end
+
+      -- 2) SECOND PRIORITY: Resume interrupted resurrections
+      if interruptedResurrections[unitID] and unitData.taskStatus ~= "in_progress" then
+        local interrupted = interruptedResurrections[unitID]
+        if Spring.ValidFeatureID(interrupted.featureID) then
+          local featureDef = FeatureDefs[Spring.GetFeatureDefID(interrupted.featureID)]
+          if featureDef and featureDef.resurrectable then
+            -- Check if feature is still available (not at unit limit)
+            local currentTargets = targetedFeatures[interrupted.featureID] or 0
+            if currentTargets < maxUnitsPerFeature then
+              scvlog("Unit", unitID, "resuming interrupted resurrection of feature", interrupted.featureID, "(attempt", interrupted.attempts .. ")")
+              
+              -- Reserve the feature
+              targetedFeatures[interrupted.featureID] = currentTargets + 1
+              
+              -- Track active resurrection
+              activeResurrections[interrupted.featureID] = activeResurrections[interrupted.featureID] or {}
+              table.insert(activeResurrections[interrupted.featureID], unitID)
+              
+              -- Clear the interruption and resume
+              interruptedResurrections[unitID] = nil
+              giveScriptOrder(unitID, CMD.RESURRECT, {interrupted.featureID + Game.maxUnits}, {})
+              unitData.featureID = interrupted.featureID
+              unitData.taskType = "resurrecting"
+              unitData.taskStatus = "in_progress"
+              resurrectingUnits[unitID] = true
+              
+              -- Update dynamic scaling since unit is no longer idle
+              updateDynamicMaxValues()
+              
+              return  -- Exit after issuing the first valid order
+            else
+              scvlog("Unit", unitID, "cannot resume resurrection - feature", interrupted.featureID, "at unit limit")
+            end
+          end
+        end
+        
+        -- Feature no longer exists/resurrectable or at limit
+        scvlog("Unit", unitID, "abandoning interrupted resurrection - feature no longer valid/available")
+        interruptedResurrections[unitID] = nil
+      end
+
+      -- 3) Resurrecting Logic
+      if checkboxes.resurrecting.state and unitData.taskStatus ~= "in_progress" then
+        performResurrection(unitID, unitData)
+      end
+
+      -- 4) Collecting Logic
+      if checkboxes.collecting.state and unitData.taskStatus ~= "in_progress" then
+        performCollection(unitID, unitData)
+      end
+
+      -- 5) Healing Logic (all other damaged units not covered by emergency healing)
+      if checkboxes.healing.state and unitData.taskStatus ~= "in_progress" then
+        performHealing(unitID, unitData)
+      end
+
       -- If any of the steps set unitData.taskStatus = "in_progress",
       -- we skip further steps for that unit (due to the checks above),
       -- but we continue on to the next unit in the loop.
