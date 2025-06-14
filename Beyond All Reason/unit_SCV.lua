@@ -964,9 +964,9 @@ function processUnits(units)
     if isMyResbot(unitID, unitDefID) then
       repeat
         -- Opportunistic reclaim of live enemy non-combatant buildings (if engine allows)
-        -- Only if within 1/10th of reclaim range
+
         local x, y, z = spGetUnitPosition(unitID)
-        local closeRadius = reclaimRadius * 0.25
+        local closeRadius = reclaimRadius * 0.10
         local enemyUnits = Spring.GetUnitsInCylinder(x, z, closeRadius, Spring.ENEMY_UNITS)
         for _, enemyID in ipairs(enemyUnits) do
           if Spring.ValidUnitID(enemyID) and not Spring.GetUnitIsDead(enemyID) then
